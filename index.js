@@ -43,6 +43,8 @@ class HeatingMatAccessory {
         };
 
         this.initServices();
+
+        this.scanTimer = null; // 스캔 재시작 타이머
         this.initNoble();
     }
 
@@ -211,11 +213,10 @@ class HeatingMatAccessory {
             this.log(`[BLE] Noble 상태 변경: ${state}`);
             if (state === 'poweredOn') {
                 this.log('[BLE] 매트 스캔 시작...');
-                //noble.startScanning([this.serviceUuid], false);
-                noble.startScanning([], true);
+                this.startScanningLoop();
             } else {
                 this.log.warn('[BLE] Noble이 블루투스 하드웨어를 사용할 수 없습니다. 상태 확인 필요.');
-                noble.stopScanning();
+                this.stopScanningLoop();
             }
         });
 
@@ -230,9 +231,36 @@ class HeatingMatAccessory {
         // 상태가 PoweredOn일 때 즉시 스캔 시작
         if (noble.state === 'poweredOn') {
             this.log('[BLE] Noble 상태가 이미 PoweredOn입니다. 즉시 스캔 시작.');
-            //noble.startScanning([this.serviceUuid], false);
-            noble.startScanning([], true)
+            this.startScanningLoop();
         }
+    }
+    startScanningLoop() {
+        // 이전에 실행 중인 타이머가 있다면 정리
+        if (this.scanTimer) {
+            clearInterval(this.scanTimer);
+        }
+
+        // 5초마다 스캔을 재시작하는 루프 설정
+        this.scanTimer = setInterval(() => {
+            if (noble.state === 'poweredOn' && !this.peripheral) {
+                this.log.debug('[BLE] 스캔 타이밍 문제 해결을 위해 스캔 중단 후 재시작...');
+                noble.stopScanning(() => {
+                    // 스캔 중단 후 즉시 다시 시작 (필터링 제거, 중복 허용)
+                    noble.startScanning([], true);
+                });
+            }
+        }, 5000); // 5초마다 실행
+
+        // 최초 실행
+        noble.startScanning([], true);
+    }
+
+    stopScanningLoop() {
+        if (this.scanTimer) {
+            clearInterval(this.scanTimer);
+            this.scanTimer = null;
+        }
+        noble.stopScanning();
     }
 
     connectPeripheral(peripheral) {
