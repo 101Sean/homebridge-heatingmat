@@ -212,7 +212,7 @@ class HeatingMatAccessory {
             if (state === 'poweredOn') {
                 this.log('[BLE] 매트 스캔 시작...');
                 //noble.startScanning([this.serviceUuid], false);
-                noble.startScanning([], false);
+                noble.startScanning([], true);
             } else {
                 this.log.warn('[BLE] Noble이 블루투스 하드웨어를 사용할 수 없습니다. 상태 확인 필요.');
                 noble.stopScanning();
@@ -230,7 +230,8 @@ class HeatingMatAccessory {
         // 상태가 PoweredOn일 때 즉시 스캔 시작
         if (noble.state === 'poweredOn') {
             this.log('[BLE] Noble 상태가 이미 PoweredOn입니다. 즉시 스캔 시작.');
-            noble.startScanning([this.serviceUuid], false);
+            //noble.startScanning([this.serviceUuid], false);
+            noble.startScanning([], true)
         }
     }
 
