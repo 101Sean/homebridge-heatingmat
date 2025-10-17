@@ -1,6 +1,6 @@
 const noble = require('@abandonware/noble');
 
-// 온도-레벨 매핑 (HomeKit <> 매트)
+// 온도-레벨 매핑 (HomeKit 온도 <-> 매트 레벨)
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
 const MIN_TEMP = 15;
@@ -13,7 +13,7 @@ class HeatingMatAccessory {
         this.Service = this.api.hap.Service;
         this.Characteristic = this.api.hap.Characteristic;
 
-        // MAC Address
+        // 필수 설정값 (MAC Address)
         this.macAddress = (config.mac_address || '').toLowerCase().replace(/[^0-9a-f]/g, '');
         if (!this.macAddress) {
             this.log.error('config.json에 mac_address가 지정되지 않았습니다.');
@@ -29,7 +29,7 @@ class HeatingMatAccessory {
             return;
         }
 
-        this.name = config.name || '전기 매트';
+        this.name = config.name || '스마트 히팅 매트';
         this.tempChar = null;
         this.timeChar = null;
 
@@ -80,10 +80,12 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.currentTemp);
 
         // HEAT 모드 고정
-        this.thermostatService.setCharacteristic(this.Characteristic.TargetHeatingCoolingState,
-            this.Characteristic.TargetHeatingCoolingState.HEAT)
-            .setProps({ validValues: [this.Characteristic.TargetHeatingCoolingState.HEAT] })
-            .onSet((value, callback) => callback());
+        const targetHeatingCoolingStateCharacteristic = this.thermostatService.getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
+            .setValue(this.Characteristic.TargetHeatingCoolingState.HEAT); // 기본값을 HEAT로 설정
+
+        targetHeatingCoolingStateCharacteristic.setProps({
+            validValues: [this.Characteristic.TargetHeatingCoolingState.HEAT] // HEAT 모드만 허용
+        });
 
         // ON/OFF 상태 반영 (Get)
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
@@ -115,19 +117,17 @@ class HeatingMatAccessory {
         if (value > MAX_TEMP) level = 7;
 
         const packet = this.createControlPacket(level);
-        this.log(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. packet: ${packet.toString('hex')}`);
+        this.log(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. 패킷: ${packet.toString('hex')}`);
 
         if (this.tempChar) {
             try {
                 await this.tempChar.write(packet, false);
 
-                // 상태 업데이트
                 this.currentState.targetTemp = value;
                 this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
                 this.currentState.currentHeatingCoolingState =
                     level > 0 ? this.Characteristic.CurrentHeatingCoolingState.HEAT : this.Characteristic.CurrentHeatingCoolingState.OFF;
 
-                // HomeKit에 업데이트된 상태 전송
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
 
@@ -148,13 +148,11 @@ class HeatingMatAccessory {
 
         await this.sendTimerCommand(hours);
 
-        // 상태 업데이트
         this.currentState.timerHours = hours;
         this.currentState.timerOn = hours > 0;
 
-        // HomeKit에 업데이트된 상태 전송
         this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
-        this.log(`[Timer] 밝기 ${value}% 설정 -> ${hours} 시간 (상태: ${this.currentState.timerOn})`);
+        this.log(`[Timer] 밝기 ${value}% -> ${hours} 시간 설정 완료. (ON 상태: ${this.currentState.timerOn})`);
     }
 
     // 타이머 ON/OFF 핸들러
@@ -184,11 +182,9 @@ class HeatingMatAccessory {
 
         await this.sendTimerCommand(hoursToSend);
 
-        // 상태 업데이트
         this.currentState.timerHours = hoursToSend;
         this.currentState.timerOn = value;
 
-        // HomeKit에 업데이트된 상태 전송
         this.timerService.updateCharacteristic(this.Characteristic.Brightness, brightnessToSet);
     }
 
@@ -217,7 +213,7 @@ class HeatingMatAccessory {
                 this.log('[BLE] 매트 스캔 시작...');
                 noble.startScanning([this.serviceUuid], false);
             } else {
-                this.log.warn('[BLE] 블루투스 하드웨어를 사용할 수 없습니다. 상태 확인 필요.');
+                this.log.warn('[BLE] Noble이 블루투스 하드웨어를 사용할 수 없습니다. 상태 확인 필요.');
                 noble.stopScanning();
             }
         });
@@ -256,6 +252,7 @@ class HeatingMatAccessory {
         peripheral.connect(async (error) => {
             if (error) {
                 this.log.error(`[BLE] 매트 연결 실패: ${error.message}. 5초 후 재스캔...`);
+                // 연결 실패 시 재스캔 로직 호출
                 peripheral.emit('disconnect');
                 return;
             }
