@@ -32,6 +32,7 @@ class HeatingMatAccessory {
         this.name = config.name || '스마트 히팅 매트';
         this.tempChar = null;
         this.timeChar = null;
+        this.peripheral = null; // [FIX] Noble 연결 인스턴스 추적용
 
         // 현재 상태 저장 (마지막 설정값을 저장)
         this.currentState = {
@@ -123,7 +124,15 @@ class HeatingMatAccessory {
 
         if (this.tempChar) {
             try {
-                await this.tempChar.write(packet, false);
+                await new Promise((resolve, reject) => {
+                    this.tempChar.write(packet, false, (error) => {
+                        if (error) {
+                            reject(error);
+                        } else {
+                            resolve();
+                        }
+                    });
+                });
 
                 this.currentState.targetTemp = value;
                 this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
@@ -135,6 +144,10 @@ class HeatingMatAccessory {
 
             } catch (error) {
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
+                // 쓰기 실패 시 연결 해제 루틴 호출 (재스캔 유도)
+                if (this.peripheral) {
+                    this.peripheral.disconnect();
+                }
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
@@ -196,9 +209,21 @@ class HeatingMatAccessory {
 
         if (this.timeChar) {
             try {
-                await this.timeChar.write(packet, false);
+                await new Promise((resolve, reject) => {
+                    this.timeChar.write(packet, false, (error) => {
+                        if (error) {
+                            reject(error);
+                        } else {
+                            resolve();
+                        }
+                    });
+                });
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
+                // 쓰기 실패 시 연결 해제 루틴 호출 (재스캔 유도)
+                if (this.peripheral) {
+                    this.peripheral.disconnect();
+                }
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
@@ -209,10 +234,12 @@ class HeatingMatAccessory {
 
     // BLE 연결 관리 (Noble)
     initNoble() {
+        noble.removeAllListeners();
+
         noble.on('stateChange', (state) => {
             this.log(`[BLE] Noble 상태 변경: ${state}`);
             if (state === 'poweredOn') {
-                this.log('[BLE] 매트 스캔 시작...');
+                this.log('[BLE] 매트 스캔 시작... (5초 재시작 루프 활성화)');
                 this.startScanningLoop();
             } else {
                 this.log.warn('[BLE] Noble이 블루투스 하드웨어를 사용할 수 없습니다. 상태 확인 필요.');
@@ -221,38 +248,50 @@ class HeatingMatAccessory {
         });
 
         noble.on('discover', (peripheral) => {
-            if (peripheral.address.toLowerCase() === this.macAddress) {
-                this.log.info(`[BLE] 매트 장치 발견: ${peripheral.address}`);
-                noble.stopScanning();
+            const targetAddress = this.macAddress;
+            const currentAddress = peripheral.address.toLowerCase();
+
+            if (currentAddress === targetAddress) {
+                this.log.info(`[BLE] 매트 장치 발견: ${peripheral.address} (타입: ${peripheral.addressType})`);
+                this.stopScanningLoop();
                 this.connectPeripheral(peripheral);
             }
         });
 
         // 상태가 PoweredOn일 때 즉시 스캔 시작
         if (noble.state === 'poweredOn') {
-            this.log('[BLE] Noble 상태가 이미 PoweredOn입니다. 즉시 스캔 시작.');
+            this.log('[BLE] Noble 상태가 이미 PoweredOn입니다. 즉시 스캔 시작. (5초 재시작 루프 활성화)');
             this.startScanningLoop();
         }
     }
+
     startScanningLoop() {
         // 이전에 실행 중인 타이머가 있다면 정리
         if (this.scanTimer) {
             clearInterval(this.scanTimer);
         }
 
+        const scanLogic = () => {
+            if (noble.state === 'poweredOn' && !this.peripheral) {
+                this.log.debug('[BLE] 스캔 재시작...');
+                // 필터링 제거, 중복 허용
+                noble.startScanning([], true);
+            }
+        };
+
+        // 최초 실행
+        scanLogic();
+
         // 5초마다 스캔을 재시작하는 루프 설정
         this.scanTimer = setInterval(() => {
             if (noble.state === 'poweredOn' && !this.peripheral) {
-                this.log.debug('[BLE] 스캔 타이밍 문제 해결을 위해 스캔 중단 후 재시작...');
+                // 스캔 중단 후 즉시 다시 시작
                 noble.stopScanning(() => {
-                    // 스캔 중단 후 즉시 다시 시작 (필터링 제거, 중복 허용)
-                    noble.startScanning([], true);
+                    this.log.debug('[BLE] 스캔 타이밍 문제 해결을 위해 스캔 중단 후 재시작...');
+                    scanLogic();
                 });
             }
         }, 5000); // 5초마다 실행
-
-        // 최초 실행
-        noble.startScanning([], true);
     }
 
     stopScanningLoop() {
@@ -264,15 +303,19 @@ class HeatingMatAccessory {
     }
 
     connectPeripheral(peripheral) {
+        this.peripheral = peripheral;
+
         // 연결 해제 시 재스캔 루틴 등록
         peripheral.once('disconnect', () => {
             this.log.warn(`[BLE] 매트 연결 해제됨. 5초 후 재스캔...`);
             this.tempChar = null;
             this.timeChar = null;
-            // 5초 후 재스캔 시작
+            this.peripheral = null;
+
+            // 5초 후 재스캔 루프 시작
             setTimeout(() => {
                 if (noble.state === 'poweredOn') {
-                    noble.startScanning([this.serviceUuid], false);
+                    this.startScanningLoop();
                 } else {
                     this.log.error('[BLE] 재스캔 시도 실패: Noble 상태가 PoweredOn이 아닙니다.');
                 }
@@ -282,8 +325,9 @@ class HeatingMatAccessory {
         peripheral.connect(async (error) => {
             if (error) {
                 this.log.error(`[BLE] 매트 연결 실패: ${error.message}. 5초 후 재스캔...`);
-                // 연결 실패 시 재스캔 로직 호출
-                peripheral.emit('disconnect');
+                // 연결 실패 시 재스캔 루프 호출
+                this.peripheral = null;
+                this.startScanningLoop();
                 return;
             }
 
@@ -291,6 +335,7 @@ class HeatingMatAccessory {
             try {
                 const { services } = await peripheral.discoverAllServicesAndCharacteristics();
                 const mainService = services.find(s => s.uuid === this.serviceUuid);
+
                 if (!mainService) {
                     this.log.error(`[BLE] 필수 서비스(${this.serviceUuid})를 찾을 수 없습니다. 연결 해제.`);
                     peripheral.disconnect();
