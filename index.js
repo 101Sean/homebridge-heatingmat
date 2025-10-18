@@ -151,7 +151,7 @@ class HeatingMatAccessory {
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
                 this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT);
+                    : this.currentState.TargetHeatingCoolingState.HEAT);
 
             } catch (error) {
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
@@ -277,7 +277,7 @@ class HeatingMatAccessory {
 
                     const targetAddress = this.macAddress.toUpperCase();
 
-                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    await new Promise(resolve => setTimeout(resolve, 5000));
                     await this.adapter.stopDiscovery();
 
                     const deviceAddresses = await this.adapter.devices();
@@ -296,7 +296,11 @@ class HeatingMatAccessory {
                         this.log.info(`[BLE] 매트 장치 발견: ${this.device.address}`);
                         await this.connectDevice();
                     } else {
-                        this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다.`);
+                        if (deviceAddresses.length > 0) {
+                            this.log.info(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
+                        } else {
+                            this.log.info(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
+                        }
                     }
 
                 } catch (error) {
