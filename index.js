@@ -185,7 +185,8 @@ class HeatingMatAccessory {
             this.log.info(`[Reset-Cache] bluetoothctl 결과: ${stdout.trim()}`);
             if (stderr) this.log.warn(`[Reset-Cache] bluetoothctl stderr: ${stderr.trim()}`);
         } catch (error) {
-            this.log.error(`[Reset-Cache] BlueZ 캐시 제거 실패 (일반적일 수 있음): ${error.message}`);
+            // 이 명령어는 장치가 연결되지 않았을 때 실패할 수 있으므로, 경고 수준으로 로그를 남깁니다.
+            this.log.warn(`[Reset-Cache] BlueZ 캐시 제거 실패 (장치가 알려지지 않았을 수 있음): ${error.message}`);
         }
     }
 
@@ -382,10 +383,11 @@ class HeatingMatAccessory {
         try {
             this.log.info(`[BLE] 매트 연결 시도...`);
 
-            // transport: 'le' (Low Energy)를 명시하고, timeout을 늘려서 안정성을 높입니다.
-            await this.device.connect({ transport: 'le', timeout: 10000 });
+            // transport: 'le' (Low Energy)를 명시하고, timeout을 20000ms(20초)로 늘려 안정성을 높입니다.
+            await this.device.connect({ transport: 'le', timeout: 20000 });
 
             this.isConnected = true;
+            this.log.debug(`[BLE] 장치 연결 성공! GATT 초기화 단계로 진입.`);
 
             this.device.on('disconnect', () => {
                 this.log.warn(`[BLE] 매트 연결 해제됨 (외부 요인). 재연결 루프를 시작합니다.`);
@@ -395,7 +397,7 @@ class HeatingMatAccessory {
             const authPacket = this.createAuthPacket();
             this.gatt = await this.device.gatt();
 
-            // ★★★ NEW LOGIC: Discover characteristics BEFORE authentication write ★★★
+            // 특성 탐색 시작 및 인증 시도
             this.log.warn(`[AUTH] 연결 성공! GATT 탐색 시작 및 인증 시도.`);
             this.log.info(`[BLE] 특성 탐색 시작: 서비스(${this.serviceUuid}), 특성(온도:${this.charTempUuid}, 타이머:${this.charTimeUuid})`);
 
@@ -412,24 +414,29 @@ class HeatingMatAccessory {
 
             this.log.info('[BLE] 모든 필수 특성 발견. 제어 준비 완료.');
 
-            // Use the discovered characteristic object for the authentication write
+            // 발견된 특성 객체의 writeValue를 사용해 인증 쓰기
             this.log.warn(`[AUTH] 특성 발견 완료. 인증 패킷 전송 시도: ${authPacket.toString('hex')}`);
             await this.tempCharacteristic.writeValue(authPacket);
 
             this.log.info('[AUTH] 인증 패킷 전송 성공. 매트가 셧다운되지 않았다면, 다음 단계로 이동합니다.');
 
-            // Authentication succeeded, proceed to state synchronization
-            await this.handleSetTargetTemperature(MIN_TEMP); // OFF 명령을 다시 보내 강제로 끔 (혹시 15도로 켜졌다면)
+            // 인증 성공, 상태 동기화 진행
+            await this.handleSetTargetTemperature(MIN_TEMP);
             await this.readCurrentState();
 
         } catch (error) {
-            this.log.error(`[BLE] 매트 연결 또는 인증 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
-            // 연결 실패 시 장치 캐시를 지우고 재시도
-            this.disconnectDevice(`연결/인증 실패: ${error.message}`, true);
+            const errorMessage = error.message || String(error);
+            this.log.error(`[BLE] 매트 연결 또는 인증 실패: ${errorMessage}. 재스캔 루프를 시작합니다.`);
+
+            // le-connection-abort-by-local 또는 이와 유사한 OS 레벨 오류가 발생하면, 캐시를 지우고 재시도합니다.
+            if (errorMessage.includes('le-connection-abort-by-local') || errorMessage.includes('Operation failed')) {
+                this.log.warn('[ERROR-FIX] BlueZ 캐시 문제로 추정. OS 캐시를 지우고 재시도합니다.');
+                await this.removeDeviceCache();
+            }
+
+            this.disconnectDevice(`연결/인증 실패: ${errorMessage}`, true);
         }
     }
-
-    // discoverCharacteristics 함수는 connectDevice에 통합되어 제거되었습니다.
 
     async readCurrentState() {
         try {
