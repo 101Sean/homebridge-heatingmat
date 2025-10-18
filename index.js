@@ -9,7 +9,7 @@ const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30;
 
 const MAX_TIMER_HOURS = 10;
-const BRIGHTNESS_PER_HOUR = 100 / MAX_TIMER_HOURS;
+const BRIGHTNESS_PER_HOUR = 10;
 
 const sleep = util.promisify(setTimeout);
 
@@ -55,23 +55,13 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
-    createTempPacket(level) {
-        const checkSum = 0xFF - (level & 0xFF);
+    createControlPacket(value) {
+        const dataByte = value;
+
+        let checkSum = (255 - dataByte) & 0xFF;
 
         const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(level, 0);
-        buffer.writeUInt8(checkSum, 1);
-        buffer.writeUInt8(0x00, 2);
-        buffer.writeUInt8(0x00, 3);
-
-        return buffer;
-    }
-
-    createTimerPacket(hours) {
-        const checkSum = 0xFF - (hours & 0xFF);
-
-        const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(hours, 0);
+        buffer.writeUInt8(dataByte, 0);
         buffer.writeUInt8(checkSum, 1);
         buffer.writeUInt8(0x00, 2);
         buffer.writeUInt8(0x00, 3);
@@ -111,7 +101,7 @@ class HeatingMatAccessory {
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(() => this.currentState.currentHeatingCoolingState);
 
-        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.Characteristic.TemperatureDisplayUnits.CELSIUS);
+        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.TemperatureDisplayUnits.CELSIUS);
 
         this.timerService = new this.Service.Lightbulb(this.name + ' 타이머 설정');
 
@@ -120,11 +110,11 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.timerOn);
 
         this.timerService.getCharacteristic(this.Characteristic.Brightness)
-            .setProps({ minValue: 0, maxValue: 100, minStep: 10 })
+            .setProps({ minValue: 0, maxValue: 100, minStep: BRIGHTNESS_PER_HOUR })
             .onSet(this.handleSetTimerHours.bind(this))
-            .onGet(() => Math.round(this.currentState.timerHours * BRIGHTNESS_PER_HOUR));
+            .onGet(() => this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
 
-        this.timerService.setCharacteristic(this.Characteristic.Brightness, Math.round(this.currentState.timerHours * BRIGHTNESS_PER_HOUR));
+        this.timerService.setCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
         this.timerService.setCharacteristic(this.Characteristic.On, this.currentState.timerOn);
     }
 
@@ -141,12 +131,11 @@ class HeatingMatAccessory {
 
     async handleSetTargetTemperature(value) {
         let level = TEMP_LEVEL_MAP[Math.round(value / 5) * 5] || 0;
-
-        if (level > MAX_LEVEL) level = MAX_LEVEL;
         if (value < MIN_TEMP) level = 0;
+        if (value >= MAX_TEMP) level = MAX_LEVEL;
 
-        const packet = this.createTempPacket(level);
-        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. **온도 패킷:** ${packet.toString('hex')}`);
+        const packet = this.createControlPacket(level);
+        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. 새 패킷: ${packet.toString('hex')}`);
 
 
         if (this.tempCharacteristic && this.isConnected) {
@@ -195,7 +184,7 @@ class HeatingMatAccessory {
         this.currentState.timerHours = hours;
         this.currentState.timerOn = hours > 0;
 
-        const brightnessToSet = Math.round(hours * BRIGHTNESS_PER_HOUR);
+        const brightnessToSet = hours * BRIGHTNESS_PER_HOUR;
 
         this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
         this.timerService.updateCharacteristic(this.Characteristic.Brightness, brightnessToSet);
@@ -216,10 +205,10 @@ class HeatingMatAccessory {
 
             if (hoursToSend === 0) {
                 hoursToSend = 1;
-                brightnessToSet = Math.round(BRIGHTNESS_PER_HOUR);
-                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간으로 설정.');
+                brightnessToSet = BRIGHTNESS_PER_HOUR;
+                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간(10%)으로 설정.');
             } else {
-                brightnessToSet = Math.round(hoursToSend * BRIGHTNESS_PER_HOUR);
+                brightnessToSet = hoursToSend * BRIGHTNESS_PER_HOUR;
                 this.log.info(`[Timer] HomeKit 스위치 ON. ${hoursToSend}시간으로 재설정.`);
             }
         }
@@ -233,8 +222,8 @@ class HeatingMatAccessory {
     }
 
     async sendTimerCommand(hours) {
-        const packet = this.createTimerPacket(hours);
-        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. **타이머 패킷:** ${packet.toString('hex')}`);
+        const packet = this.createControlPacket(hours);
+        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. 새 패킷: ${packet.toString('hex')}`);
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
@@ -327,7 +316,7 @@ class HeatingMatAccessory {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
                 }
             } else {
-                //this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
+                this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
             }
 
             await sleep(this.scanInterval);
@@ -376,7 +365,7 @@ class HeatingMatAccessory {
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
             } else {
-                this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.charTimeUuid}) 연결 해제.`);
+                this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
                 this.disconnectDevice(true);
             }
         } catch (error) {
