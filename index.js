@@ -2,15 +2,18 @@ const NodeBle = require('node-ble');
 const util = require('util');
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
-const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
+const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 50: 7 };
 const MIN_TEMP = 15;
 const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30;
 
 const MAX_TIMER_HOURS = 10;
 const BRIGHTNESS_PER_HOUR = 10;
+const SCAN_DURATION_MS = 10000;
 
 const sleep = util.promisify(setTimeout);
+const MAX_RETRY_COUNT = 3;
+const RETRY_DELAY_MS = 300;
 
 class HeatingMatAccessory {
     constructor(log, config, api) {
@@ -81,7 +84,6 @@ class HeatingMatAccessory {
 
         return buffer;
     }
-
 
     initServices() {
         this.accessoryInformation = new this.Service.AccessoryInformation()
@@ -155,18 +157,24 @@ class HeatingMatAccessory {
     async sendTempCommand(tempL) {
         const levelL = TEMP_LEVEL_MAP[Math.round(tempL / 5) * 5] || 0;
         const levelR = 0;
-
         const actualTempL = LEVEL_TEMP_MAP[levelL];
         const actualTempR = MIN_TEMP;
-
         const packet = this.createTempPacket(levelL, levelR);
-        this.log.info(`[Temp] Setting Left: ${actualTempL}°C (Level ${levelL}). Packet: ${packet.toString('hex')}`);
+        const packetHex = packet.toString('hex');
 
-        if (this.tempCharacteristic && this.isConnected) {
+        if (!this.tempCharacteristic || !this.isConnected) {
+            this.log.warn('[Temp] BLE not connected. Command failed. (Retrying connection in background)');
+            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+
+        for (let attempt = 1; attempt <= MAX_RETRY_COUNT; attempt++) {
             try {
-                // BLE 쓰기 명령 안정화를 위해 지연 시간 증가
-                await sleep(200);
-                await this.tempCharacteristic.writeValueWithoutResponse(packet);
+                this.log.info(`[Temp] Attempt ${attempt}/${MAX_RETRY_COUNT}: Setting Left: ${actualTempL}°C (Level ${levelL}). Packet: ${packetHex}`);
+
+                await sleep(100);
+                await this.tempCharacteristic.writeValue(packet);
+
+                this.log.info(`[Temp] Write successful after ${attempt} attempt(s).`);
 
                 this.currentState.targetTempL = actualTempL;
                 this.currentState.targetTempR = actualTempR;
@@ -188,15 +196,17 @@ class HeatingMatAccessory {
                     ? this.Characteristic.TargetHeatingCoolingState.HEAT
                     : this.Characteristic.TargetHeatingCoolingState.OFF);
 
+                return;
+
             } catch (error) {
-                this.log.error(`[Temp] BLE Write Error: ${error.message}`);
-                this.disconnectDevice();
-                throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+                this.log.warn(`[Temp] Attempt ${attempt} failed: ${error.message}. Retrying in ${RETRY_DELAY_MS}ms...`);
+                await sleep(RETRY_DELAY_MS);
             }
-        } else {
-            this.log.warn('[Temp] BLE not connected. Command failed. (Retrying connection in background)');
-            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
+
+        this.log.error(`[Temp] Failed to write packet (${packetHex}) after ${MAX_RETRY_COUNT} attempts. Disconnecting.`);
+        this.disconnectDevice();
+        throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
 
 
@@ -249,23 +259,33 @@ class HeatingMatAccessory {
     async sendTimerCommand(hoursL) {
         const hoursR = 0;
         const packet = this.createTimerPacket(hoursL, hoursR);
-        this.log.info(`[Timer] Attempting to send Left: ${hoursL} hours command. Packet: ${packet.toString('hex')}`);
+        const packetHex = packet.toString('hex');
 
-        if (this.timeCharacteristic && this.isConnected) {
-            try {
-                // BLE 쓰기 명령 안정화를 위해 지연 시간 증가
-                await sleep(200);
-                await this.timeCharacteristic.writeValueWithoutResponse(packet);
-            } catch (error) {
-                this.log.error(`[Timer] BLE Write Error (Time: ${hoursL}/0): ${error.message}`);
-                this.disconnectDevice();
-                throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-            }
-        } else {
+        if (!this.timeCharacteristic || !this.isConnected) {
             this.log.warn('[Timer] BLE not connected. Command failed. (Retrying connection in background)');
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
+
+        for (let attempt = 1; attempt <= MAX_RETRY_COUNT; attempt++) {
+            try {
+                this.log.info(`[Timer] Attempt ${attempt}/${MAX_RETRY_COUNT}: Sending Left: ${hoursL} hours command. Packet: ${packetHex}`);
+
+                await sleep(100);
+                await this.timeCharacteristic.writeValue(packet);
+
+                this.log.info(`[Timer] Write successful after ${attempt} attempt(s).`);
+                return;
+            } catch (error) {
+                this.log.warn(`[Timer] Attempt ${attempt} failed: ${error.message}. Retrying in ${RETRY_DELAY_MS}ms...`);
+                await sleep(RETRY_DELAY_MS);
+            }
+        }
+
+        this.log.error(`[Timer] Failed to write packet (${packetHex}) after ${MAX_RETRY_COUNT} attempts. Disconnecting.`);
+        this.disconnectDevice();
+        throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
+
 
     initNodeBle() {
         this.initializeBleAdapter();
@@ -309,13 +329,14 @@ class HeatingMatAccessory {
 
                     const targetAddress = this.macAddress.toUpperCase();
 
-                    await sleep(5000);
+                    await sleep(SCAN_DURATION_MS);
                     await this.adapter.stopDiscovery();
 
                     const deviceAddresses = await this.adapter.devices();
 
                     let targetDevice = null;
                     let foundAddress = null;
+                    let deviceName = 'Unknown';
 
                     for (const address of deviceAddresses) {
                         const normalizedAddress = address.toUpperCase().replace(/:/g, '');
@@ -323,17 +344,23 @@ class HeatingMatAccessory {
                         if (normalizedAddress === targetAddress) {
                             targetDevice = await this.adapter.getDevice(address);
                             foundAddress = address;
+
+                            try {
+                                deviceName = await targetDevice.getName();
+                            } catch (e) {
+                                this.log.debug(`Could not retrieve name for ${foundAddress}: ${e.message}`);
+                            }
                             break;
                         }
                     }
 
                     if (targetDevice) {
                         this.device = targetDevice;
-                        this.log.info(`[BLE] Mat device found: ${foundAddress}`);
+                        this.log.info(`[BLE] Mat device found: ${deviceName} (${foundAddress})`);
                         await this.connectDevice();
                     } else {
                         if (deviceAddresses.length > 0) {
-                            this.log.info(`[BLE] Target device (${targetAddress}) not found.`);
+                            this.log.info(`[BLE] Target device (${targetAddress}) not found. Devices found: ${deviceAddresses.length}`);
                         } else {
                             this.log.info(`[BLE] Target device (${targetAddress}) not found. No surrounding devices found.`);
                         }
@@ -368,6 +395,8 @@ class HeatingMatAccessory {
 
             await this.discoverCharacteristics();
 
+            await this.enableNotificationsAndInit();
+
         } catch (error) {
             this.log.error(`[BLE] Mat connection failed: ${error.message}. Restarting scan loop.`);
             this.disconnectDevice(true);
@@ -379,7 +408,6 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] Target Service for discovery: ${this.serviceUuid}`);
             this.log.info(`[BLE] Target Characteristics: (Temp: ${this.charTempUuid}, Time: ${this.charTimeUuid})`);
 
-            // 연결 후 GATT 검색을 위해 지연 시간 증가 (1000ms)
             await sleep(1000);
 
             const gatt = await this.device.gatt();
@@ -403,10 +431,75 @@ class HeatingMatAccessory {
         }
     }
 
+    async enableNotificationsAndInit() {
+        if (!this.isConnected || !this.tempCharacteristic || !this.timeCharacteristic) {
+            this.log.warn('[Init] Connection or Characteristics not ready for initialization.');
+            return;
+        }
+
+        try {
+            this.log.info('[Init] Enabling Notifications (Indication) for FF20 and FF30...');
+
+            this.log.info('[Init] 1. FF20 (온도) 알림 활성화.');
+            await this.tempCharacteristic.startNotifications();
+            this.tempCharacteristic.on('valuechanged', this.handleCharacteristicUpdate.bind(this));
+            this.log.info('[Init] FF20 Notifications enabled.');
+
+            this.log.info('[Init] 2. FF30 (타이머) 알림 활성화.');
+            await this.timeCharacteristic.startNotifications();
+            this.timeCharacteristic.on('valuechanged', this.handleCharacteristicUpdate.bind(this));
+            this.log.info('[Init] FF30 Notifications enabled.');
+
+            this.log.info('[Init] 3. 초기 상태 요청 패킷 전송.');
+            await this.sendInitCommandWithRetry();
+
+        } catch (error) {
+            this.log.error(`[Init] Notification setup or Initialization write failed: ${error.message}`);
+            this.disconnectDevice();
+            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+    }
+
+    async sendInitCommandWithRetry() {
+        const initPacket = Buffer.from([0x01]);
+        const packetHex = initPacket.toString('hex');
+
+        for (let attempt = 1; attempt <= MAX_RETRY_COUNT; attempt++) {
+            try {
+                this.log.info(`[Init] Attempt ${attempt}/${MAX_RETRY_COUNT}: Sending Initialization Packet to FF20: ${packetHex}`);
+
+                await sleep(500);
+                await this.tempCharacteristic.writeValue(initPacket);
+
+                this.log.info('[Init] Initialization command sent successfully via FF20.');
+                return;
+            } catch (error) {
+                this.log.warn(`[Init] Attempt ${attempt} failed: ${error.message}. Retrying in ${RETRY_DELAY_MS}ms...`);
+                await sleep(RETRY_DELAY_MS);
+            }
+        }
+
+        this.log.error(`[Init] Failed to send initialization packet (${packetHex}) after ${MAX_RETRY_COUNT} attempts. Disconnecting.`);
+        this.disconnectDevice();
+        throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+
+    handleCharacteristicUpdate(data) {
+        this.log.debug(`[RX] Data Received: ${data.toString('hex')}`);
+    }
+
     disconnectDevice(resetDevice = false) {
         const deviceToDisconnect = this.device;
 
         this.isConnected = false;
+
+        if (this.tempCharacteristic) {
+            this.tempCharacteristic.stopNotifications().catch(e => this.log.warn(`[BLE] Failed to stop FF20 notifications: ${e.message}`));
+        }
+        if (this.timeCharacteristic) {
+            this.timeCharacteristic.stopNotifications().catch(e => this.log.warn(`[BLE] Failed to stop FF30 notifications: ${e.message}`));
+        }
+
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
 
