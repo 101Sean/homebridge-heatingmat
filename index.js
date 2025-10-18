@@ -1,6 +1,7 @@
 const NodeBle = require('node-ble');
 const util = require('util');
 
+const MAX_LEVEL = 7;
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
 const MIN_TEMP = 15;
@@ -8,7 +9,7 @@ const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30;
 
 const MAX_TIMER_HOURS = 10;
-const BRIGHTNESS_PER_HOUR = 10;
+const BRIGHTNESS_PER_HOUR = 100 / MAX_TIMER_HOURS;
 
 const sleep = util.promisify(setTimeout);
 
@@ -54,33 +55,29 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
-    // --- 패킷 생성 로직 변경 (가장 중요한 수정) ---
-    /**
-     * 장치 제어 패킷을 생성합니다. (5A로 시작하는 프로토콜 가정)
-     * @param {number} value Level (0-7) 또는 Timer Value (1-10)
-     * @returns {Buffer} 4바이트 제어 패킷
-     */
-    createControlPacket(value) {
-        // value는 Level (0~7) 또는 Timer (1~10) 중 하나입니다.
-        const startByte = 0x5A;
-        const dataByte = value; // Level 또는 Timer 값
+    createTempPacket(level) {
+        const checkSum = 0xFF - (level & 0xFF);
 
-        // 체크섬 로직: startByte + dataByte의 합산 후 하위 8비트
-        let checkSum = (startByte + dataByte) & 0xFF;
-
-        // 패킷 구성: [0x5A, Level/Timer, CheckSum, 0x00]
         const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(startByte, 0); // 0: 시작 바이트 (0x5A)
-        buffer.writeUInt8(dataByte, 1);  // 1: 데이터 바이트 (Level/Timer)
-        buffer.writeUInt8(checkSum, 2);  // 2: 체크 바이트
-        buffer.writeUInt8(0x00, 3);      // 3: 예약 바이트
+        buffer.writeUInt8(level, 0);
+        buffer.writeUInt8(checkSum, 1);
+        buffer.writeUInt8(0x00, 2);
+        buffer.writeUInt8(0x00, 3);
 
-        // Level 5 (40도) 예시: 5A 05 5F 00 (이전: 05fa0000)
-        // Timer 5 (5시간) 예시: 5A 05 5F 00
-        // 전원 끄기 (Level 0) 예시: 5A 00 5A 00 (이전: 00ff0000)
         return buffer;
     }
-    // --- 패킷 생성 로직 변경 끝 ---
+
+    createTimerPacket(hours) {
+        const checkSum = 0xFF - (hours & 0xFF);
+
+        const buffer = Buffer.alloc(4);
+        buffer.writeUInt8(hours, 0);
+        buffer.writeUInt8(checkSum, 1);
+        buffer.writeUInt8(0x00, 2);
+        buffer.writeUInt8(0x00, 3);
+
+        return buffer;
+    }
 
     initServices() {
         this.accessoryInformation = new this.Service.AccessoryInformation()
@@ -114,7 +111,7 @@ class HeatingMatAccessory {
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(() => this.currentState.currentHeatingCoolingState);
 
-        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.TemperatureDisplayUnits.CELSIUS);
+        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.Characteristic.TemperatureDisplayUnits.CELSIUS);
 
         this.timerService = new this.Service.Lightbulb(this.name + ' 타이머 설정');
 
@@ -123,11 +120,11 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.timerOn);
 
         this.timerService.getCharacteristic(this.Characteristic.Brightness)
-            .setProps({ minValue: 0, maxValue: 100, minStep: BRIGHTNESS_PER_HOUR })
+            .setProps({ minValue: 0, maxValue: 100, minStep: 10 })
             .onSet(this.handleSetTimerHours.bind(this))
-            .onGet(() => this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
+            .onGet(() => Math.round(this.currentState.timerHours * BRIGHTNESS_PER_HOUR));
 
-        this.timerService.setCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
+        this.timerService.setCharacteristic(this.Characteristic.Brightness, Math.round(this.currentState.timerHours * BRIGHTNESS_PER_HOUR));
         this.timerService.setCharacteristic(this.Characteristic.On, this.currentState.timerOn);
     }
 
@@ -144,17 +141,16 @@ class HeatingMatAccessory {
 
     async handleSetTargetTemperature(value) {
         let level = TEMP_LEVEL_MAP[Math.round(value / 5) * 5] || 0;
-        if (value < MIN_TEMP) level = 0;
-        if (value >= MAX_TEMP) level = 7;
 
-        const packet = this.createControlPacket(level);
-        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. **새 패킷:** ${packet.toString('hex')}`);
+        if (level > MAX_LEVEL) level = MAX_LEVEL;
+        if (value < MIN_TEMP) level = 0;
+
+        const packet = this.createTempPacket(level);
+        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. **온도 패킷:** ${packet.toString('hex')}`);
 
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
-                // 주의: 온도/타이머 특성이 WRITE_WITHOUT_RESPONSE를 지원하지 않을 경우, writeValue를 사용해야 합니다.
-                // 대부분의 BLE 장치에서 제어는 WRITE_WITHOUT_RESPONSE를 사용하므로 이대로 유지합니다.
                 await this.tempCharacteristic.writeValueWithoutResponse(packet);
 
                 this.currentState.targetTemp = value;
@@ -173,7 +169,6 @@ class HeatingMatAccessory {
                     : this.Characteristic.TargetHeatingCoolingState.HEAT);
 
             } catch (error) {
-                // HomeKit 오류 처리 시, 이전 패킷 전송 오류와 동일한 코드를 사용합니다.
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
                 this.disconnectDevice();
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
@@ -200,7 +195,7 @@ class HeatingMatAccessory {
         this.currentState.timerHours = hours;
         this.currentState.timerOn = hours > 0;
 
-        const brightnessToSet = hours * BRIGHTNESS_PER_HOUR;
+        const brightnessToSet = Math.round(hours * BRIGHTNESS_PER_HOUR);
 
         this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
         this.timerService.updateCharacteristic(this.Characteristic.Brightness, brightnessToSet);
@@ -221,10 +216,10 @@ class HeatingMatAccessory {
 
             if (hoursToSend === 0) {
                 hoursToSend = 1;
-                brightnessToSet = BRIGHTNESS_PER_HOUR;
-                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간(10%)으로 설정.');
+                brightnessToSet = Math.round(BRIGHTNESS_PER_HOUR);
+                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간으로 설정.');
             } else {
-                brightnessToSet = hoursToSend * BRIGHTNESS_PER_HOUR;
+                brightnessToSet = Math.round(hoursToSend * BRIGHTNESS_PER_HOUR);
                 this.log.info(`[Timer] HomeKit 스위치 ON. ${hoursToSend}시간으로 재설정.`);
             }
         }
@@ -238,8 +233,8 @@ class HeatingMatAccessory {
     }
 
     async sendTimerCommand(hours) {
-        const packet = this.createControlPacket(hours);
-        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. **새 패킷:** ${packet.toString('hex')}`);
+        const packet = this.createTimerPacket(hours);
+        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. **타이머 패킷:** ${packet.toString('hex')}`);
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
@@ -381,7 +376,7 @@ class HeatingMatAccessory {
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
             } else {
-                this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
+                this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.charTimeUuid}) 연결 해제.`);
                 this.disconnectDevice(true);
             }
         } catch (error) {
