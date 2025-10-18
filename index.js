@@ -10,7 +10,7 @@ const DEFAULT_HEAT_TEMP = 30;
 const MAX_TIMER_HOURS = 10;
 const BRIGHTNESS_PER_HOUR = 10;
 
-const sleep = util.promisify(setTimeout);
+const sleep = util.promisify(setTimeout);//
 
 class HeatingMatAccessory {
     constructor(log, config, api) {
