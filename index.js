@@ -4,8 +4,8 @@ const util = require('util');
 // 온도-레벨 매핑 (HomeKit 온도 <-> 매트 레벨)
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
-const MIN_TEMP = 15;
-const MAX_TEMP = 50;
+const MIN_TEMP = 15; // Level 0에 해당
+const MAX_TEMP = 50; // Level 7에 해당
 const DEFAULT_HEAT_TEMP = 30; // 전원 ON 시 복구할 기본 온도 (Level 3)
 
 // 타이머 로직 상수 (사용자 요청 반영: 10% = 1시간, 100% = 10시간)
@@ -59,9 +59,9 @@ class HeatingMatAccessory {
         this.initNodeBle(); // node-ble 초기화 및 연결 루프 시작
     }
 
-    // BLE 제어 패킷
+    // BLE 제어 패킷 생성
     createControlPacket(value) {
-        const level = Math.min(Math.max(0, value), 7); // Level은 0~7 사이의 값
+        const level = Math.min(Math.max(0, value), 7);
         const checkByte = 0xFF - level; // 역방향 유효성 검사 바이트
 
         const buffer = Buffer.alloc(4);
@@ -110,7 +110,8 @@ class HeatingMatAccessory {
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(() => this.currentState.currentHeatingCoolingState);
 
-        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.Characteristic.TemperatureDisplayUnits.CELSIUS);
+        // 🚨 오류 수정: this.Characteristic이 중복 사용되어 발생하는 TypeError를 해결했습니다.
+        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.TemperatureDisplayUnits.CELSIUS);
 
 
         // 타이머 (Lightbulb)
@@ -182,7 +183,7 @@ class HeatingMatAccessory {
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
-            // 🚨 수정: 불필요한 즉각적인 connectDevice() 호출을 제거하고, 루프에 맡김
+            // 불필요한 즉각적인 connectDevice() 호출을 제거하고, 루프에 맡김
             this.log.warn('[Temp] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
@@ -260,7 +261,7 @@ class HeatingMatAccessory {
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
-            // 🚨 수정: 불필요한 즉각적인 connectDevice() 호출을 제거하고, 루프에 맡김
+            // 불필요한 즉각적인 connectDevice() 호출을 제거하고, 루프에 맡김
             this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
@@ -272,9 +273,9 @@ class HeatingMatAccessory {
 
     initNodeBle() {
         try {
-            // Ble 클래스를 인스턴스화하고 init()을 호출합니다.
-            const bleInstance = new Ble(); // Ble 클래스 인스턴스 생성 (구조 분해로 이미 가져왔음)
-            const { adapter } = bleInstance.init(this.adapterId); // 어댑터 초기화 및 가져오기
+            // Ble 클래스를 인스턴스화하고 init()을 호출합니다. (node-ble 오류 수정 반영)
+            const bleInstance = new Ble();
+            const { adapter } = bleInstance.init(this.adapterId);
 
             this.adapter = adapter;
             this.startScanningLoop();
