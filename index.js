@@ -32,11 +32,6 @@ class HeatingMatAccessory {
             return;
         }
 
-        if (this.serviceUuid.length <= 4 && this.serviceUuid.length > 0) {
-            this.log.warn(`[UUID] 디컴파일 코드에 따라 서비스 UUID를 표준 16비트 '${this.serviceUuid}'로 설정했습니다.`);
-        }
-
-
         this.name = config.name || '스마트 히팅 매트';
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
@@ -98,7 +93,7 @@ class HeatingMatAccessory {
             .onGet(() => {
                 return this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.currentState.TargetHeatingCoolingState.HEAT;
+                    : this.Characteristic.TargetHeatingCoolingState.HEAT; // 오타 수정: this.currentState -> this.Characteristic
             });
 
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
@@ -158,7 +153,7 @@ class HeatingMatAccessory {
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
                 this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.currentState.TargetHeatingCoolingState.HEAT);
+                    : this.Characteristic.TargetHeatingCoolingState.HEAT); // 오타 수정: this.currentState -> this.Characteristic
 
             } catch (error) {
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
@@ -353,7 +348,7 @@ class HeatingMatAccessory {
     async discoverCharacteristics() {
         try {
             this.log.info(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
-            this.log.info(`[BLE] 특성 탐색 대상 UUIDs (온도/타이머): ${this.charTempUuid}, ${this.charTimeUuid}`);
+            this.log.info(`[BLE] 특성 탐색 시도: (온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
 
             await sleep(500);
 
@@ -372,9 +367,8 @@ class HeatingMatAccessory {
                 this.disconnectDevice(true);
             }
         } catch (error) {
-            const fullServiceUuid = `0000${this.serviceUuid}-0000-1000-8000-00805f9b34fb`;
             this.log.error(`[BLE] 특성 탐색 오류: ${error.message}.`);
-            this.log.error(`[BLE] ---> config.json의 'service_uuid'를 128비트 표준 UUID인 '${fullServiceUuid}'로 변경하여 테스트해 보세요.`);
+            this.log.error('[BLE] config.json에 서비스 UUID와 특성 UUID를 전체 128비트 형식으로 정확히 입력했는지 확인해 주세요.');
             this.disconnectDevice(true);
         }
     }
