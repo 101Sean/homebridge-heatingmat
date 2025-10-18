@@ -253,14 +253,27 @@ class HeatingMatAccessory {
         if (this.isScanningLoopActive) return;
         this.isScanningLoopActive = true;
 
-        const { bluetooth } = createBluetooth(this.adapterId);
-        this.adapter = bluetooth.adapters[0];
+        try {
+            // FIX: Correctly initialize node-ble and retrieve the adapter object
+            const { bluetooth } = createBluetooth();
+            this.adapter = bluetooth.getAdapter(this.adapterId);
+        } catch (error) {
+            this.log.error(`[BLE Init Error] Bluetooth 초기화 실패: ${error.message}. ${this.adapterId} 어댑터 확인 필요.`);
+            this.isScanningLoopActive = false;
+            return;
+        }
 
         this.scanAndConnect();
     }
 
     async scanAndConnect() {
         if (this.isConnected) return;
+
+        if (!this.adapter) {
+            this.log.error('[BLE] 어댑터가 초기화되지 않았습니다. 15초 후 재시도...');
+            setTimeout(() => this.scanAndConnect(), this.scanInterval);
+            return;
+        }
 
         this.log.info(`[BLE] 장치 스캔 시작: MAC ${this.macAddress}`);
 
@@ -288,7 +301,7 @@ class HeatingMatAccessory {
                 setTimeout(() => this.scanAndConnect(), 5000);
             });
 
-            await this.getServices();
+            await this.getServicesAndCharacteristics();
 
             await this.tempCharacteristic.write(this.createAuthPacket(), false);
             this.log.info('[BLE] 인증 패킷 전송 완료.');
@@ -315,7 +328,7 @@ class HeatingMatAccessory {
         this.device = null;
     }
 
-    async getServices() {
+    async getServicesAndCharacteristics() {
         const service = await this.device.getService(this.serviceUuid);
         this.tempCharacteristic = await service.getCharacteristic(this.charTempUuid);
         this.timeCharacteristic = await service.getCharacteristic(this.charTimeUuid);
