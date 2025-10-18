@@ -285,7 +285,11 @@ class HeatingMatAccessory {
                     let targetDevice = null;
 
                     for (const address of deviceAddresses) {
-                        if (address === targetAddress) {
+                        // **[핵심 수정]** 발견된 주소(콜론 포함)를 설정된 주소 형식(콜론 없음)과 비교하기 위해 정규화합니다.
+                        const normalizedAddress = address.toUpperCase().replace(/:/g, '');
+
+                        if (normalizedAddress === targetAddress) {
+                            // getDevice에는 콜론이 있는 원본 주소를 전달합니다.
                             targetDevice = await this.adapter.getDevice(address);
                             break;
                         }
