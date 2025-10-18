@@ -1,8 +1,8 @@
-const { Ble } = require('node-ble');
+const { createBluetooth } = require('node-ble');
 const util = require('util');
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
-const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 50: 7 };
+const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
 const MIN_TEMP = 15;
 const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30;
@@ -117,6 +117,7 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.timerOn);
 
         this.timerService.getCharacteristic(this.Characteristic.Brightness)
+            .setProps({ minValue: 0, maxValue: 100, minStep: BRIGHTNESS_PER_HOUR })
             .onSet(this.handleSetTimerHours.bind(this))
             .onGet(() => this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
 
@@ -252,8 +253,7 @@ class HeatingMatAccessory {
         if (this.isScanningLoopActive) return;
         this.isScanningLoopActive = true;
 
-        const { createBluetooth } = new Ble(this.adapterId);
-        const bluetooth = createBluetooth();
+        const { bluetooth } = createBluetooth(this.adapterId);
         this.adapter = bluetooth.adapters[0];
 
         this.scanAndConnect();
