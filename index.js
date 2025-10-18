@@ -283,21 +283,21 @@ class HeatingMatAccessory {
                     const deviceAddresses = await this.adapter.devices();
 
                     let targetDevice = null;
+                    let foundAddress = null; // MAC 주소 로깅을 위한 변수 추가
 
                     for (const address of deviceAddresses) {
-                        // **[핵심 수정]** 발견된 주소(콜론 포함)를 설정된 주소 형식(콜론 없음)과 비교하기 위해 정규화합니다.
                         const normalizedAddress = address.toUpperCase().replace(/:/g, '');
 
                         if (normalizedAddress === targetAddress) {
-                            // getDevice에는 콜론이 있는 원본 주소를 전달합니다.
                             targetDevice = await this.adapter.getDevice(address);
+                            foundAddress = address; // 발견된 정확한 주소 저장
                             break;
                         }
                     }
 
                     if (targetDevice) {
                         this.device = targetDevice;
-                        this.log.info(`[BLE] 매트 장치 발견: ${this.device.address}`);
+                        this.log.info(`[BLE] 매트 장치 발견: ${foundAddress}`); // 발견된 주소로 로깅 수정
                         await this.connectDevice();
                     } else {
                         if (deviceAddresses.length > 0) {
@@ -344,6 +344,9 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
+            // 연결 후 GATT 서비스가 안정화될 때까지 500ms 지연
+            await new Promise(resolve => setTimeout(resolve, 500));
+
             const gatt = await this.device.gatt();
             const service = await gatt.getPrimaryService(this.serviceUuid);
 
