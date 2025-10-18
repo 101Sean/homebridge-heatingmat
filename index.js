@@ -34,7 +34,9 @@ class HeatingMatAccessory {
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
         this.device = null;
-        this.adapter = null;
+        this.adapter = null; // 어댑터는 scanAndConnect에서 설정됨
+        this.bluetooth = null; // 블루투스 관리자 객체
+        this.destroyBluetooth = null;
         this.isConnected = false;
 
         this.isScanningLoopActive = false;
@@ -254,11 +256,11 @@ class HeatingMatAccessory {
         this.isScanningLoopActive = true;
 
         try {
-            // FIX: Correctly initialize node-ble and retrieve the adapter object
-            const { bluetooth } = createBluetooth();
-            this.adapter = bluetooth.getAdapter(this.adapterId);
+            const { bluetooth, destroy } = createBluetooth();
+            this.bluetooth = bluetooth;
+            this.destroyBluetooth = destroy;
         } catch (error) {
-            this.log.error(`[BLE Init Error] Bluetooth 초기화 실패: ${error.message}. ${this.adapterId} 어댑터 확인 필요.`);
+            this.log.error(`[BLE Init Error] Bluetooth 초기화 실패: ${error.message}. 시스템 서비스 확인 필요.`);
             this.isScanningLoopActive = false;
             return;
         }
@@ -267,17 +269,19 @@ class HeatingMatAccessory {
     }
 
     async scanAndConnect() {
-        if (this.isConnected) return;
-
-        if (!this.adapter) {
-            this.log.error('[BLE] 어댑터가 초기화되지 않았습니다. 15초 후 재시도...');
-            setTimeout(() => this.scanAndConnect(), this.scanInterval);
-            return;
-        }
+        if (this.isConnected || !this.bluetooth) return;
 
         this.log.info(`[BLE] 장치 스캔 시작: MAC ${this.macAddress}`);
 
         try {
+            // FIX: Get the adapter again right before use and validate the waitDevice function
+            const adapter = await this.bluetooth.getAdapter(this.adapterId);
+            this.adapter = adapter;
+
+            if (typeof this.adapter.waitDevice !== 'function') {
+                throw new Error(`Adapter object is missing 'waitDevice' function. Adapter ID: ${this.adapterId}.`);
+            }
+
             const device = await this.adapter.waitDevice(this.macAddress, this.scanInterval / 1000);
             this.device = device;
             await this.connectDevice();
