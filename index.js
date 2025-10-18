@@ -1,4 +1,4 @@
-const { Ble } = require('node-ble');
+const NodeBle = require('node-ble');
 const util = require('util');
 
 // 온도-레벨 매핑 (HomeKit 온도 <-> 매트 레벨)
@@ -267,19 +267,30 @@ class HeatingMatAccessory {
         }
     }
 
-    // --------------------------------------------------------
-    // BLE 연결 관리 (node-ble)
-    // --------------------------------------------------------
-
     initNodeBle() {
+        this.initializeBleAdapter();
+    }
+
+    async initializeBleAdapter() {
         try {
-            // Ble 클래스를 인스턴스화하고 init()을 호출합니다. (node-ble 오류 수정 반영)
-            const bleInstance = new Ble();
-            const { adapter } = bleInstance.init(this.adapterId);
+            this.log.info('[BLE] node-ble createBluetooth()를 사용하여 BLE 초기화를 시도합니다.');
+
+            // 1. createBluetooth() 함수를 호출하여 Bluetooth 객체를 가져옵니다.
+            const { bluetooth } = NodeBle.createBluetooth();
+
+            // 2. 특정 어댑터 ID를 사용하거나 기본 어댑터를 가져옵니다.
+            let adapter;
+            if (this.adapterId && this.adapterId !== 'hci0') {
+                adapter = await bluetooth.getAdapter(this.adapterId);
+            } else {
+                adapter = await bluetooth.defaultAdapter();
+            }
 
             this.adapter = adapter;
+            this.log.info(`[BLE] 어댑터(${this.adapterId}) 초기화 성공. 스캔 루프 시작.`);
             this.startScanningLoop();
         } catch (error) {
+            // 블루투스 서비스가 없거나 권한 문제 등으로 실패할 수 있습니다.
             this.log.error(`[BLE] node-ble 초기화 실패. BlueZ 서비스가 실행 중인지, 혹은 권한이 있는지 확인하세요: ${error.message}`);
         }
     }
@@ -306,6 +317,7 @@ class HeatingMatAccessory {
                     await new Promise(resolve => setTimeout(resolve, 1000));
                     await this.adapter.stopScanning();
 
+                    // getDevices()는 연결 가능한 모든 장치 목록을 반환합니다.
                     const devices = await this.adapter.getDevices();
                     // MAC 주소로 장치 객체 찾기
                     this.device = devices.find(d => d.address === targetAddress);
