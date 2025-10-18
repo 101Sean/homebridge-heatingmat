@@ -1,5 +1,6 @@
 const NodeBle = require('node-ble');
 const util = require('util');
+const exec = util.promisify(require('child_process').exec); // 시스템 명령어 실행용
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
@@ -40,6 +41,7 @@ class HeatingMatAccessory {
         this.isConnected = false;
 
         this.isScanningLoopActive = false;
+        this.resetInProgress = false;
 
         this.currentState = {
             targetTemp: MIN_TEMP,
@@ -47,7 +49,8 @@ class HeatingMatAccessory {
             currentHeatingCoolingState: this.Characteristic.CurrentHeatingCoolingState.OFF,
             timerHours: 0,
             timerOn: false,
-            lastHeatTemp: DEFAULT_HEAT_TEMP
+            lastHeatTemp: DEFAULT_HEAT_TEMP,
+            resetSwitchOn: false
         };
 
         this.initServices();
@@ -127,6 +130,64 @@ class HeatingMatAccessory {
 
         this.timerService.setCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
         this.timerService.setCharacteristic(this.Characteristic.On, this.currentState.timerOn);
+
+        // Homebridge 강제 재시작 스위치 추가
+        this.resetSwitchService = new this.Service.Switch(this.name + ' 연결 재시작', 'reset');
+
+        this.resetSwitchService.getCharacteristic(this.Characteristic.On)
+            .onSet(this.handleResetSwitch.bind(this))
+            .onGet(() => this.currentState.resetSwitchOn);
+    }
+
+    // 재시작 스위치 핸들러
+    async handleResetSwitch(value) {
+        if (this.resetInProgress) {
+            this.log.warn('[Reset] 재시작 요청 무시됨: 이미 진행 중.');
+            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.BUSY);
+        }
+
+        if (value === true) {
+            this.log.warn('=============================================');
+            this.log.warn('[Reset] HomeKit 재시작 스위치 ON. 연결 상태 강제 리셋 시작.');
+            this.log.warn('=============================================');
+
+            this.resetInProgress = true;
+            this.currentState.resetSwitchOn = true;
+
+            // 1. 기존 연결 끊기 및 장치 정보 삭제
+            this.disconnectDevice('HomeKit 리셋 명령', true);
+
+            // 2. BlueZ 스택에서 장치 캐시 제거 시도
+            await this.removeDeviceCache();
+
+            // 3. 5초 후 스위치를 다시 OFF로 설정하고 재스캔 루프 시작
+            await sleep(5000);
+            this.currentState.resetSwitchOn = false;
+            this.resetSwitchService.updateCharacteristic(this.Characteristic.On, false);
+            this.resetInProgress = false;
+
+            this.log.warn('[Reset] 강제 리셋 완료. 새로운 스캔/연결 시도를 시작합니다.');
+
+        } else {
+            this.log.debug('[Reset] HomeKit 재시작 스위치 OFF (수동 또는 자동 해제)');
+            this.currentState.resetSwitchOn = false;
+        }
+    }
+
+    // ★★★★ BlueZ 캐시 제거 함수 (최후의 수단) ★★★★
+    async removeDeviceCache() {
+        const mac = this.macAddress.toUpperCase().match(/.{1,2}/g).join(':');
+        this.log.warn(`[Reset-Cache] BlueZ에서 장치(${mac}) 캐시 제거 시도...`);
+        try {
+            // bluetoothctl을 사용하여 장치 연결 해제 및 제거 시도
+            // 'disconnect'는 연결되어 있으면 안전하게 끊고, 'remove'는 저장된 페어링 정보/캐시를 제거합니다.
+            const { stdout, stderr } = await exec(`bluetoothctl disconnect ${mac} && bluetoothctl remove ${mac}`);
+            this.log.info(`[Reset-Cache] bluetoothctl 결과: ${stdout.trim()}`);
+            if (stderr) this.log.warn(`[Reset-Cache] bluetoothctl stderr: ${stderr.trim()}`);
+        } catch (error) {
+            this.log.error(`[Reset-Cache] BlueZ 캐시 제거 실패 (일반적일 수 있음): ${error.message}`);
+            this.log.error(`[Reset-Cache] (권한 또는 bluetoothctl 부재 가능성) Homebridge를 root 권한으로 실행하거나 'pi' 또는 'homebridge' 사용자의 권한을 확인해 보세요.`);
+        }
     }
 
     async handleSetTargetHeatingCoolingState(value) {
@@ -275,7 +336,7 @@ class HeatingMatAccessory {
         this.log.info('[BLE] 백그라운드 스캔/연결 루프 시작.');
 
         while (this.isScanningLoopActive) {
-            if (!this.isConnected) {
+            if (!this.isConnected && !this.resetInProgress) {
                 this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
                 try {
                     await this.adapter.startDiscovery();
@@ -304,10 +365,10 @@ class HeatingMatAccessory {
 
                 } catch (error) {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
-                    this.disconnectDevice(`스캔 루프 오류: ${error.message}`, true); // 오류 발생 시 장치 리셋
+                    this.disconnectDevice(`스캔 루프 오류: ${error.message}`, true);
                 }
             } else {
-                this.log.debug('[BLE] 연결 유지 중. 다음 스캔 주기까지 대기.');
+                this.log.debug(`[BLE] 연결 유지 중이거나 리셋 진행 중 (${this.resetInProgress}). 다음 스캔 주기까지 대기.`);
             }
 
             await sleep(this.scanInterval);
@@ -315,26 +376,27 @@ class HeatingMatAccessory {
     }
 
     async connectDevice() {
-        if (!this.device || this.isConnected) { return; }
+        if (!this.device || this.isConnected || this.resetInProgress) { return; }
 
         try {
             this.log.info(`[BLE] 매트 연결 시도...`);
             await this.device.connect();
             this.isConnected = true;
-            this.log.info(`[BLE] 매트 연결 성공. GATT 탐색 전 3초 대기.`);
 
-            await sleep(3000);
+            // 500ms 딜레이 유지
+            this.log.info(`[BLE] 매트 연결 성공. GATT 탐색 전 0.5초 대기.`);
+            await sleep(500);
 
             this.device.on('disconnect', () => {
                 this.log.warn(`[BLE] 매트 연결 해제됨 (외부 요인). 재연결 루프를 시작합니다.`);
-                this.disconnectDevice('외부 연결 끊김', true); // 외부 요인으로 끊기면 장치 리셋
+                this.disconnectDevice('외부 연결 끊김', true);
             });
 
             await this.discoverCharacteristics();
 
         } catch (error) {
             this.log.error(`[BLE] 매트 연결 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
-            // ★★★★ 연결 실패 시 device 객체를 완전히 리셋 ★★★★
+            // 연결 실패 시 device 객체를 완전히 리셋
             this.disconnectDevice(`연결 실패: ${error.message}`, true);
         }
     }
@@ -414,7 +476,6 @@ class HeatingMatAccessory {
         this.timeCharacteristic = null;
 
         if (resetDevice) {
-            // 연결 실패 시 device 객체를 완전히 리셋하여 다음 스캔/연결 시도를 새롭게 시작하도록 함
             this.device = null;
         }
 
@@ -433,7 +494,8 @@ class HeatingMatAccessory {
         return [
             this.accessoryInformation,
             this.thermostatService,
-            this.timerService
+            this.timerService,
+            this.resetSwitchService
         ];
     }
 }
