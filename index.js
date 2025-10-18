@@ -164,7 +164,8 @@ class HeatingMatAccessory {
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
-                await sleep(50);
+                // BLE 쓰기 명령 안정화를 위해 지연 시간 증가
+                await sleep(200);
                 await this.tempCharacteristic.writeValueWithoutResponse(packet);
 
                 this.currentState.targetTempL = actualTempL;
@@ -252,7 +253,8 @@ class HeatingMatAccessory {
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
-                await sleep(50);
+                // BLE 쓰기 명령 안정화를 위해 지연 시간 증가
+                await sleep(200);
                 await this.timeCharacteristic.writeValueWithoutResponse(packet);
             } catch (error) {
                 this.log.error(`[Timer] BLE Write Error (Time: ${hoursL}/0): ${error.message}`);
@@ -377,7 +379,8 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] Target Service for discovery: ${this.serviceUuid}`);
             this.log.info(`[BLE] Target Characteristics: (Temp: ${this.charTempUuid}, Time: ${this.charTimeUuid})`);
 
-            await sleep(500);
+            // 연결 후 GATT 검색을 위해 지연 시간 증가 (1000ms)
+            await sleep(1000);
 
             const gatt = await this.device.gatt();
 
