@@ -168,7 +168,7 @@ class HeatingMatAccessory {
 
             } catch (error) {
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
-                this.disconnectDevice();
+                this.disconnectDevice(`특성 쓰기 실패: ${error.message}`);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
@@ -234,7 +234,7 @@ class HeatingMatAccessory {
                 await this.timeCharacteristic.writeValue(packet);
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
-                this.disconnectDevice();
+                this.disconnectDevice(`타이머 쓰기 실패: ${error.message}`);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
@@ -304,6 +304,7 @@ class HeatingMatAccessory {
 
                 } catch (error) {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
+                    this.disconnectDevice(`스캔 루프 오류: ${error.message}`, true); // 오류 발생 시 장치 리셋
                 }
             } else {
                 this.log.debug('[BLE] 연결 유지 중. 다음 스캔 주기까지 대기.');
@@ -320,28 +321,27 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] 매트 연결 시도...`);
             await this.device.connect();
             this.isConnected = true;
-            this.log.info(`[BLE] 매트 연결 성공.`);
+            this.log.info(`[BLE] 매트 연결 성공. GATT 탐색 전 3초 대기.`);
 
-            // ★★★★ 연결 성공 후 1초 대기 추가 ★★★★
-            await sleep(1000);
-            // ★★★★★★★★★★★★★★★★★★★★★★
+            await sleep(3000);
 
             this.device.on('disconnect', () => {
-                this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
-                this.disconnectDevice();
+                this.log.warn(`[BLE] 매트 연결 해제됨 (외부 요인). 재연결 루프를 시작합니다.`);
+                this.disconnectDevice('외부 연결 끊김', true); // 외부 요인으로 끊기면 장치 리셋
             });
 
             await this.discoverCharacteristics();
 
         } catch (error) {
             this.log.error(`[BLE] 매트 연결 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
-            this.disconnectDevice(true);
+            // ★★★★ 연결 실패 시 device 객체를 완전히 리셋 ★★★★
+            this.disconnectDevice(`연결 실패: ${error.message}`, true);
         }
     }
 
     async discoverCharacteristics() {
         try {
-            this.log.info(`[BLE] 특성 탐색: 서비스(${this.serviceUuid}), 특성(온도:${this.charTempUuid}, 타이머:${this.charTimeUuid})`);
+            this.log.info(`[BLE] 특성 탐색 시작: 서비스(${this.serviceUuid}), 특성(온도:${this.charTempUuid}, 타이머:${this.charTimeUuid})`);
             await sleep(500);
 
             const gatt = await this.device.gatt();
@@ -356,11 +356,11 @@ class HeatingMatAccessory {
                 await this.readCurrentState();
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. 연결 해제.`);
-                this.disconnectDevice(true);
+                this.disconnectDevice('특성 누락', true);
             }
         } catch (error) {
             this.log.error(`[BLE] 특성 탐색 오류: ${error.message}. UUID를 확인하세요.`);
-            this.disconnectDevice(true);
+            this.disconnectDevice(`특성 탐색 오류: ${error.message}`, true);
         }
     }
 
@@ -400,24 +400,30 @@ class HeatingMatAccessory {
 
         } catch (error) {
             this.log.warn(`[Sync] 초기 상태 읽기 실패 (READ 오류 또는 데이터 해석 오류): ${error.message}`);
+            this.disconnectDevice(`상태 읽기 실패: ${error.message}`, true);
         }
     }
 
-    disconnectDevice(resetDevice = false) {
+    disconnectDevice(reason = '알 수 없는 이유', resetDevice = false) {
         const deviceToDisconnect = this.device;
+
+        this.log.warn(`[BLE] 연결 해제 처리 시작. 이유: ${reason}`);
 
         this.isConnected = false;
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
 
         if (resetDevice) {
+            // 연결 실패 시 device 객체를 완전히 리셋하여 다음 스캔/연결 시도를 새롭게 시작하도록 함
             this.device = null;
         }
 
         if (deviceToDisconnect) {
             deviceToDisconnect.isConnected().then(connected => {
                 if(connected) {
-                    deviceToDisconnect.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
+                    deviceToDisconnect.disconnect()
+                        .then(() => this.log.warn('[BLE] 장치 안전하게 연결 해제됨.'))
+                        .catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
                 }
             }).catch(() => {});
         }
