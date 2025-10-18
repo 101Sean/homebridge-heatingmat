@@ -322,6 +322,10 @@ class HeatingMatAccessory {
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
 
+            // ★★★★ 연결 성공 후 1초 대기 추가 ★★★★
+            await sleep(1000);
+            // ★★★★★★★★★★★★★★★★★★★★★★
+
             this.device.on('disconnect', () => {
                 this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
                 this.disconnectDevice();
