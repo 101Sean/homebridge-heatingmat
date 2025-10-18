@@ -1,12 +1,11 @@
-const NodeBle = require('node-ble'); // 🚨 수정: 전체 모듈을 NodeBle 변수로 가져옵니다.
-const util = require('util'); // for promisify if needed, but node-ble is promise-based
+const { Ble } = require('node-ble');
+const util = require('util');
 
 // 온도-레벨 매핑 (HomeKit 온도 <-> 매트 레벨)
-// 15°C = Level 0 (OFF), 50°C = Level 7 (MAX)
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
-const MIN_TEMP = 15; // Level 0에 해당
-const MAX_TEMP = 50; // Level 7에 해당
+const MIN_TEMP = 15;
+const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30; // 전원 ON 시 복구할 기본 온도 (Level 3)
 
 // 타이머 로직 상수 (사용자 요청 반영: 10% = 1시간, 100% = 10시간)
@@ -43,6 +42,9 @@ class HeatingMatAccessory {
         this.adapter = null; // node-ble 어댑터 객체
         this.isConnected = false;
 
+        // 스캔 루프 상태를 제어하기 위한 플래그 (중복 스캔 방지 목적)
+        this.isScanningLoopActive = false;
+
         // 현재 상태 저장
         this.currentState = {
             targetTemp: MIN_TEMP,
@@ -57,7 +59,7 @@ class HeatingMatAccessory {
         this.initNodeBle(); // node-ble 초기화 및 연결 루프 시작
     }
 
-    // 💡 확정된 BLE 제어 패킷 생성 (4바이트: [Level, 255 - Level, 0x00, 0x00])
+    // BLE 제어 패킷
     createControlPacket(value) {
         const level = Math.min(Math.max(0, value), 7); // Level은 0~7 사이의 값
         const checkByte = 0xFF - level; // 역방향 유효성 검사 바이트
@@ -108,7 +110,7 @@ class HeatingMatAccessory {
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(() => this.currentState.currentHeatingCoolingState);
 
-        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.TemperatureDisplayUnits.CELSIUS);
+        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.Characteristic.TemperatureDisplayUnits.CELSIUS);
 
 
         // 타이머 (Lightbulb)
@@ -175,16 +177,13 @@ class HeatingMatAccessory {
 
             } catch (error) {
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
-                // 쓰기 실패 시 재연결 루틴
+                // 쓰기 실패 시 재연결 루틴은 메인 루프에 맡기고 현재 명령은 실패 처리
                 this.disconnectDevice();
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
-            this.log.warn('[Temp] BLE 연결 없음. 명령 전송 불가. 재연결 시도합니다.');
-            // 연결 상태가 아닐 경우 연결 시도 후 예외 발생
-            if (!this.isConnected) {
-                this.connectDevice();
-            }
+            // 🚨 수정: 불필요한 즉각적인 connectDevice() 호출을 제거하고, 루프에 맡김
+            this.log.warn('[Temp] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
     }
@@ -261,10 +260,8 @@ class HeatingMatAccessory {
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
-            this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. 재연결 시도합니다.');
-            if (!this.isConnected) {
-                this.connectDevice();
-            }
+            // 🚨 수정: 불필요한 즉각적인 connectDevice() 호출을 제거하고, 루프에 맡김
+            this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
     }
@@ -275,9 +272,9 @@ class HeatingMatAccessory {
 
     initNodeBle() {
         try {
-            // 🚨 수정: NodeBle 모듈의 'Ble' 클래스에 접근하여 인스턴스를 만들고 init() 호출
-            const BleClass = NodeBle.Ble || NodeBle; // 안전하게 클래스 가져오기 시도
-            const { adapter } = new BleClass().init(this.adapterId);
+            // Ble 클래스를 인스턴스화하고 init()을 호출합니다.
+            const bleInstance = new Ble(); // Ble 클래스 인스턴스 생성 (구조 분해로 이미 가져왔음)
+            const { adapter } = bleInstance.init(this.adapterId); // 어댑터 초기화 및 가져오기
 
             this.adapter = adapter;
             this.startScanningLoop();
@@ -287,24 +284,29 @@ class HeatingMatAccessory {
     }
 
     async startScanningLoop() {
-        if (!this.adapter) {
-            this.log.error('[BLE] 어댑터 객체 없음. 스캔 시작 불가.');
+        if (!this.adapter || this.isScanningLoopActive) {
+            this.log.debug('[BLE] 스캔 루프 시작 조건을 만족하지 못했습니다. (어댑터 없음 또는 이미 실행 중)');
             return;
         }
 
-        while (true) {
+        this.isScanningLoopActive = true;
+        this.log.info('[BLE] 백그라운드 스캔/연결 루프를 시작합니다.');
+
+        while (this.isScanningLoopActive) {
             if (!this.isConnected) {
-                this.log.debug('[BLE] 스캔 시작...');
+                this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
                 try {
+                    // 1. 스캔 시작
                     await this.adapter.startScanning();
 
                     const targetAddress = this.macAddress.toUpperCase();
 
-                    // 스캔 시간을 1초로 짧게 설정하여 장치 목록만 빠르게 가져온 후 정지
+                    // 2. 1초 대기 후 장치 목록 가져오기
                     await new Promise(resolve => setTimeout(resolve, 1000));
                     await this.adapter.stopScanning();
 
                     const devices = await this.adapter.getDevices();
+                    // MAC 주소로 장치 객체 찾기
                     this.device = devices.find(d => d.address === targetAddress);
 
                     if (this.device) {
@@ -317,15 +319,18 @@ class HeatingMatAccessory {
                 } catch (error) {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
                 }
+            } else {
+                this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
             }
+
             // 설정된 간격(this.scanInterval) 대기 후 다시 시도
             await new Promise(resolve => setTimeout(resolve, this.scanInterval));
         }
     }
 
     async connectDevice() {
-        if (!this.device) {
-            this.log.warn('[BLE] 연결할 장치 객체 없음. 스캔 루프에서 장치 발견 후 호출해야 합니다.');
+        if (!this.device || this.isConnected) {
+            // device가 없거나 이미 연결되어 있으면 시도하지 않습니다.
             return;
         }
 
@@ -346,7 +351,8 @@ class HeatingMatAccessory {
 
         } catch (error) {
             this.log.error(`[BLE] 매트 연결 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
-            this.disconnectDevice(true); // 장치 객체까지 초기화
+            // 연결 실패 시 장치 객체까지 초기화하여 다음 루프에서 재탐색하도록 합니다.
+            this.disconnectDevice(true);
         }
     }
 
@@ -375,6 +381,7 @@ class HeatingMatAccessory {
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
         if (this.device && this.device.isConnected) {
+            // node-ble의 disconnect는 Promise를 반환합니다.
             this.device.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
         }
 
