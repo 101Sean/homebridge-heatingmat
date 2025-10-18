@@ -103,14 +103,13 @@ class HeatingMatAccessory {
             .onGet(() => {
                 return this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT;
+                    : this.currentState.TargetHeatingCoolingState.HEAT;
             });
 
         // CurrentHeatingCoolingState (현재 상태)
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(() => this.currentState.currentHeatingCoolingState);
 
-        // 🚨 오류 수정: this.Characteristic이 중복 사용되어 발생하는 TypeError를 해결했습니다.
         this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.TemperatureDisplayUnits.CELSIUS);
 
 
@@ -275,10 +274,8 @@ class HeatingMatAccessory {
         try {
             this.log.info('[BLE] node-ble createBluetooth()를 사용하여 BLE 초기화를 시도합니다.');
 
-            // 1. createBluetooth() 함수를 호출하여 Bluetooth 객체를 가져옵니다.
             const { bluetooth } = NodeBle.createBluetooth();
 
-            // 2. 특정 어댑터 ID를 사용하거나 기본 어댑터를 가져옵니다.
             let adapter;
             if (this.adapterId && this.adapterId !== 'hci0') {
                 adapter = await bluetooth.getAdapter(this.adapterId);
@@ -290,7 +287,6 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] 어댑터(${this.adapterId}) 초기화 성공. 스캔 루프 시작.`);
             this.startScanningLoop();
         } catch (error) {
-            // 블루투스 서비스가 없거나 권한 문제 등으로 실패할 수 있습니다.
             this.log.error(`[BLE] node-ble 초기화 실패. BlueZ 서비스가 실행 중인지, 혹은 권한이 있는지 확인하세요: ${error.message}`);
         }
     }
@@ -308,18 +304,13 @@ class HeatingMatAccessory {
             if (!this.isConnected) {
                 this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
                 try {
-                    // 1. 스캔 시작
-                    await this.adapter.startScanning();
+                    await this.adapter.startDiscovery();
 
                     const targetAddress = this.macAddress.toUpperCase();
-
-                    // 2. 1초 대기 후 장치 목록 가져오기
                     await new Promise(resolve => setTimeout(resolve, 1000));
-                    await this.adapter.stopScanning();
+                    await this.adapter.stopDiscovery();
 
-                    // getDevices()는 연결 가능한 모든 장치 목록을 반환합니다.
                     const devices = await this.adapter.getDevices();
-                    // MAC 주소로 장치 객체 찾기
                     this.device = devices.find(d => d.address === targetAddress);
 
                     if (this.device) {
@@ -336,14 +327,12 @@ class HeatingMatAccessory {
                 this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
             }
 
-            // 설정된 간격(this.scanInterval) 대기 후 다시 시도
             await new Promise(resolve => setTimeout(resolve, this.scanInterval));
         }
     }
 
     async connectDevice() {
         if (!this.device || this.isConnected) {
-            // device가 없거나 이미 연결되어 있으면 시도하지 않습니다.
             return;
         }
 
@@ -394,14 +383,12 @@ class HeatingMatAccessory {
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
         if (this.device && this.device.isConnected) {
-            // node-ble의 disconnect는 Promise를 반환합니다.
             this.device.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
         }
 
         if (resetDevice) {
             this.device = null;
         }
-        // startScanningLoop가 자동적으로 재연결을 시도합니다.
     }
 
     getServices() {
