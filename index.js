@@ -23,16 +23,19 @@ class HeatingMatAccessory {
         this.serviceUuid = (config.service_uuid || '').toLowerCase();
         this.charTempUuid = (config.char_temp_uuid || '').toLowerCase();
         this.charTimeUuid = (config.char_time_uuid || '').toLowerCase();
-        // char_set_uuid (F000FF10...) 사용하지 않음
 
         this.adapterId = config.adapter_id || 'hci0';
         this.scanInterval = (config.scan_interval_sec || 15) * 1000;
 
-        // 필수 설정 검사 (char_set_uuid 제외)
         if (!this.macAddress || !this.serviceUuid || !this.charTempUuid || !this.charTimeUuid) {
             this.log.error('config.json에 필수 설정(mac_address, service_uuid, char_temp_uuid, char_time_uuid)이 누락되었습니다.');
             return;
         }
+
+        if (this.serviceUuid.length <= 4 && this.serviceUuid.length > 0) {
+            this.log.warn(`[UUID] 디컴파일 코드에 따라 서비스 UUID를 표준 16비트 '${this.serviceUuid}'로 설정했습니다.`);
+        }
+
 
         this.name = config.name || '스마트 히팅 매트';
         this.tempCharacteristic = null;
@@ -50,7 +53,6 @@ class HeatingMatAccessory {
             timerHours: 0,
             timerOn: false,
             lastHeatTemp: DEFAULT_HEAT_TEMP
-            // settingOn 상태 제거
         };
 
         this.initServices();
@@ -117,8 +119,6 @@ class HeatingMatAccessory {
 
         this.timerService.setCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
         this.timerService.setCharacteristic(this.Characteristic.On, this.currentState.timerOn);
-
-        // 설정 제어(ff10) 관련 서비스 제거
     }
 
     async handleSetTargetHeatingCoolingState(value) {
@@ -242,7 +242,6 @@ class HeatingMatAccessory {
         }
     }
 
-    // 설정 제어(ff10) 관련 함수 제거
 
     initNodeBle() {
         this.initializeBleAdapter();
@@ -286,7 +285,6 @@ class HeatingMatAccessory {
 
                     const targetAddress = this.macAddress.toUpperCase();
 
-                    // 스캔 시간 유지
                     await sleep(5000);
                     await this.adapter.stopDiscovery();
 
@@ -354,66 +352,50 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
-            // [수정] 찾으려는 UUID들을 먼저 로깅하여 설정값 확인
             this.log.info(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
             this.log.info(`[BLE] 특성 탐색 대상 UUIDs (온도/타이머): ${this.charTempUuid}, ${this.charTimeUuid}`);
 
-            // GATT 서비스 안정화를 위해 잠시 대기
             await sleep(500);
 
             const gatt = await this.device.gatt();
 
-            // 서비스 UUID 목록 로깅 및 검증
-            const allServiceUuids = await gatt.getPrimaryServices();
-            this.log.info(`[BLE] 장치에서 발견된 모든 서비스 UUID: [${allServiceUuids.join(', ')}]`);
-            this.log.info(`[BLE] 현재 config.json에 설정된 서비스 UUID: ${this.serviceUuid}`);
-
-            if (!allServiceUuids.includes(this.serviceUuid)) {
-                this.log.error('[BLE] 설정된 서비스 UUID가 장치 목록에 없습니다. config.json 설정을 확인하세요.');
-                // [수정] 상태를 확실히 리셋하고 스캔을 재개하도록 수정
-                this.disconnectDevice(true);
-                return;
-            }
-
             const service = await gatt.getPrimaryService(this.serviceUuid);
             this.log.info(`[BLE] 서비스 ${this.serviceUuid} 발견 성공.`);
 
-            // config.json에서 읽은 128비트 주소로 특성 탐색 시도
             this.tempCharacteristic = await service.getCharacteristic(this.charTempUuid);
             this.timeCharacteristic = await service.getCharacteristic(this.charTimeUuid);
-            // 설정 제어 특성 탐색 제거
 
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
-                // [수정] 상태를 확실히 리셋하고 스캔을 재개하도록 수정
                 this.disconnectDevice(true);
             }
         } catch (error) {
-            // 특성 탐색 오류가 발생하면, 디버깅 정보와 함께 오류를 로깅합니다.
-            this.log.error(`[BLE] 특성 탐색 오류: ${error.message}. (특성 UUID 불일치 가능성)`);
-            // [수정] 오류 시에도 상태를 확실히 리셋하고 스캔을 재개하도록 수정
+            const fullServiceUuid = `0000${this.serviceUuid}-0000-1000-8000-00805f9b34fb`;
+            this.log.error(`[BLE] 특성 탐색 오류: ${error.message}.`);
+            this.log.error(`[BLE] ---> config.json의 'service_uuid'를 128비트 표준 UUID인 '${fullServiceUuid}'로 변경하여 테스트해 보세요.`);
             this.disconnectDevice(true);
         }
     }
 
     disconnectDevice(resetDevice = false) {
+        const deviceToDisconnect = this.device;
+
         this.isConnected = false;
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
-        // setCharacteristic 초기화 제거
-
-        if (this.device) {
-            this.device.isConnected().then(connected => {
-                if(connected) {
-                    this.device.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
-                }
-            });
-        }
 
         if (resetDevice) {
             this.device = null;
+        }
+
+        if (deviceToDisconnect) {
+            deviceToDisconnect.isConnected().then(connected => {
+                if(connected) {
+                    deviceToDisconnect.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
+                }
+            }).catch(e => this.log.warn(`[BLE] 연결 상태 확인 중 오류 발생 (무시): ${e.message}`));
         }
     }
 
