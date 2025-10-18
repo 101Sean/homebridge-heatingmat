@@ -54,18 +54,33 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
+    // --- 패킷 생성 로직 변경 (가장 중요한 수정) ---
+    /**
+     * 장치 제어 패킷을 생성합니다. (5A로 시작하는 프로토콜 가정)
+     * @param {number} value Level (0-7) 또는 Timer Value (1-10)
+     * @returns {Buffer} 4바이트 제어 패킷
+     */
     createControlPacket(value) {
-        const level = Math.min(Math.max(0, value), 7);
-        const checkByte = 0xFF - level;
+        // value는 Level (0~7) 또는 Timer (1~10) 중 하나입니다.
+        const startByte = 0x5A;
+        const dataByte = value; // Level 또는 Timer 값
 
+        // 체크섬 로직: startByte + dataByte의 합산 후 하위 8비트
+        let checkSum = (startByte + dataByte) & 0xFF;
+
+        // 패킷 구성: [0x5A, Level/Timer, CheckSum, 0x00]
         const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(level, 0);
-        buffer.writeUInt8(checkByte, 1);
-        buffer.writeUInt8(0x00, 2);
-        buffer.writeUInt8(0x00, 3);
+        buffer.writeUInt8(startByte, 0); // 0: 시작 바이트 (0x5A)
+        buffer.writeUInt8(dataByte, 1);  // 1: 데이터 바이트 (Level/Timer)
+        buffer.writeUInt8(checkSum, 2);  // 2: 체크 바이트
+        buffer.writeUInt8(0x00, 3);      // 3: 예약 바이트
 
+        // Level 5 (40도) 예시: 5A 05 5F 00 (이전: 05fa0000)
+        // Timer 5 (5시간) 예시: 5A 05 5F 00
+        // 전원 끄기 (Level 0) 예시: 5A 00 5A 00 (이전: 00ff0000)
         return buffer;
     }
+    // --- 패킷 생성 로직 변경 끝 ---
 
     initServices() {
         this.accessoryInformation = new this.Service.AccessoryInformation()
@@ -93,7 +108,7 @@ class HeatingMatAccessory {
             .onGet(() => {
                 return this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT; // 오타 수정: this.currentState -> this.Characteristic
+                    : this.Characteristic.TargetHeatingCoolingState.HEAT;
             });
 
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
@@ -133,11 +148,13 @@ class HeatingMatAccessory {
         if (value >= MAX_TEMP) level = 7;
 
         const packet = this.createControlPacket(level);
-        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. 패킷: ${packet.toString('hex')}`);
+        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. **새 패킷:** ${packet.toString('hex')}`);
 
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
+                // 주의: 온도/타이머 특성이 WRITE_WITHOUT_RESPONSE를 지원하지 않을 경우, writeValue를 사용해야 합니다.
+                // 대부분의 BLE 장치에서 제어는 WRITE_WITHOUT_RESPONSE를 사용하므로 이대로 유지합니다.
                 await this.tempCharacteristic.writeValueWithoutResponse(packet);
 
                 this.currentState.targetTemp = value;
@@ -153,9 +170,10 @@ class HeatingMatAccessory {
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
                 this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT); // 오타 수정: this.currentState -> this.Characteristic
+                    : this.Characteristic.TargetHeatingCoolingState.HEAT);
 
             } catch (error) {
+                // HomeKit 오류 처리 시, 이전 패킷 전송 오류와 동일한 코드를 사용합니다.
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
                 this.disconnectDevice();
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
@@ -221,7 +239,7 @@ class HeatingMatAccessory {
 
     async sendTimerCommand(hours) {
         const packet = this.createControlPacket(hours);
-        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. 패킷: ${packet.toString('hex')}`);
+        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. **새 패킷:** ${packet.toString('hex')}`);
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
