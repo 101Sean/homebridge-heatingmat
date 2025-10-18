@@ -56,13 +56,11 @@ class HeatingMatAccessory {
     }
 
     createControlPacket(value) {
-        const dataByte = value;
-
-        let checkSum = (255 - dataByte) & 0xFF;
+        const checksum = 255 - value;
 
         const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(dataByte, 0);
-        buffer.writeUInt8(checkSum, 1);
+        buffer.writeUInt8(value, 0);
+        buffer.writeUInt8(checksum, 1);
         buffer.writeUInt8(0x00, 2);
         buffer.writeUInt8(0x00, 3);
 
@@ -246,8 +244,6 @@ class HeatingMatAccessory {
 
     async initializeBleAdapter() {
         try {
-            this.log.info('[BLE] node-ble createBluetooth()를 사용하여 BLE 초기화를 시도합니다.');
-
             const { bluetooth } = NodeBle.createBluetooth();
 
             let adapter;
@@ -267,7 +263,6 @@ class HeatingMatAccessory {
 
     async startScanningLoop() {
         if (!this.adapter || this.isScanningLoopActive) {
-            this.log.debug('[BLE] 스캔 루프 시작 조건을 만족하지 못했습니다. (어댑터 없음 또는 이미 실행 중)');
             return;
         }
 
@@ -276,7 +271,6 @@ class HeatingMatAccessory {
 
         while (this.isScanningLoopActive) {
             if (!this.isConnected) {
-                this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
                 try {
                     await this.adapter.startDiscovery();
 
@@ -316,7 +310,6 @@ class HeatingMatAccessory {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
                 }
             } else {
-                //this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
             }
 
             await sleep(this.scanInterval);
@@ -349,7 +342,6 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
-            this.log.info(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
             this.log.info(`[BLE] 특성 탐색 시도: (온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
 
             await sleep(500);
