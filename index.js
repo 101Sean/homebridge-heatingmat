@@ -344,7 +344,7 @@ class HeatingMatAccessory {
         try {
             this.log.info(`[BLE] 특성 탐색 시도: (온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
 
-            await sleep(500);
+            // ***** 핵심 수정: 불필요한 지연 (sleep(500)) 제거 *****
 
             const gatt = await this.device.gatt();
 
