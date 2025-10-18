@@ -316,7 +316,7 @@ class HeatingMatAccessory {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
                 }
             } else {
-                this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
+                //this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
             }
 
             await sleep(this.scanInterval);
