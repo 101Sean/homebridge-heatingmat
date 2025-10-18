@@ -59,7 +59,7 @@ class HeatingMatAccessory {
     }
 
     createTempPacket(levelL, levelR) {
-        const level = levelL; // 매트는 보통 좌우 같은 레벨을 씀
+        const level = levelL;
         const checkSum = (0xFF - level) & 0xFF;
 
         const buffer = Buffer.alloc(4);
@@ -71,7 +71,7 @@ class HeatingMatAccessory {
         return buffer;
     }
 
-    // Level 1 (15°C) 패킷을 인증 패킷으로 사용 (01 FC 01 FC)
+    // Level 1 (15°C) 패킷을 인증 패킷으로 사용 (01 FE 01 FE)
     createAuthPacket() {
         return this.createTempPacket(1, 1);
     }
@@ -209,6 +209,7 @@ class HeatingMatAccessory {
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
+                // 확보된 특성 객체의 writeValue 사용
                 await this.tempCharacteristic.writeValue(packet);
 
                 this.currentState.targetTemp = value;
@@ -237,7 +238,6 @@ class HeatingMatAccessory {
         }
     }
 
-    // (타이머 함수들은 변경 없음, 생략)
     async handleSetTimerHours(value) {
         let hours = Math.round(value / BRIGHTNESS_PER_HOUR);
 
@@ -292,6 +292,7 @@ class HeatingMatAccessory {
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
+                // 확보된 특성 객체의 writeValue 사용
                 await this.timeCharacteristic.writeValue(packet);
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
@@ -381,7 +382,6 @@ class HeatingMatAccessory {
         try {
             this.log.info(`[BLE] 매트 연결 시도...`);
 
-            // ★★★★ 연결 매개변수 강제 설정 ★★★★
             // transport: 'le' (Low Energy)를 명시하고, timeout을 늘려서 안정성을 높입니다.
             await this.device.connect({ transport: 'le', timeout: 10000 });
 
@@ -392,28 +392,11 @@ class HeatingMatAccessory {
                 this.disconnectDevice('외부 연결 끊김', true);
             });
 
-            const authPacket = this.createAuthPacket(); // '01 FC 01 FC'
-            this.log.warn(`[AUTH] 연결 성공! transport: 'le' 적용. GATT 탐색 전 인증 패킷 전송 시도: ${authPacket.toString('hex')}`);
-
+            const authPacket = this.createAuthPacket();
             this.gatt = await this.device.gatt();
 
-            // 인증 패킷 전송
-            await this.gatt.writeCharacteristic(this.serviceUuid, this.charTempUuid, authPacket);
-
-            this.log.info('[AUTH] 인증 패킷 전송 성공. 매트가 셧다운되지 않았다면, 다음 단계로 이동합니다.');
-
-            // 인증 성공 후, 정식으로 특성 탐색 시작
-            await this.discoverCharacteristics();
-
-        } catch (error) {
-            this.log.error(`[BLE] 매트 연결 또는 인증 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
-            // BlueZ 레벨에서 연결이 거부된 경우, 캐시를 지우고 재시도
-            this.disconnectDevice(`연결/인증 실패: ${error.message}`, true);
-        }
-    }
-
-    async discoverCharacteristics() {
-        try {
+            // ★★★ NEW LOGIC: Discover characteristics BEFORE authentication write ★★★
+            this.log.warn(`[AUTH] 연결 성공! GATT 탐색 시작 및 인증 시도.`);
             this.log.info(`[BLE] 특성 탐색 시작: 서비스(${this.serviceUuid}), 특성(온도:${this.charTempUuid}, 타이머:${this.charTimeUuid})`);
 
             const service = await this.gatt.getPrimaryService(this.serviceUuid);
@@ -421,19 +404,32 @@ class HeatingMatAccessory {
             this.tempCharacteristic = await service.getCharacteristic(this.charTempUuid);
             this.timeCharacteristic = await service.getCharacteristic(this.charTimeUuid);
 
-            if (this.tempCharacteristic && this.timeCharacteristic) {
-                this.log.info('[BLE] 모든 필수 특성 발견. 제어 준비 완료.');
-                await this.handleSetTargetTemperature(MIN_TEMP); // OFF 명령을 다시 보내 강제로 끔 (혹시 15도로 켜졌다면)
-                await this.readCurrentState();
-            } else {
+            if (!this.tempCharacteristic || !this.timeCharacteristic) {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. 연결 해제.`);
                 this.disconnectDevice('특성 누락', true);
+                return;
             }
+
+            this.log.info('[BLE] 모든 필수 특성 발견. 제어 준비 완료.');
+
+            // Use the discovered characteristic object for the authentication write
+            this.log.warn(`[AUTH] 특성 발견 완료. 인증 패킷 전송 시도: ${authPacket.toString('hex')}`);
+            await this.tempCharacteristic.writeValue(authPacket);
+
+            this.log.info('[AUTH] 인증 패킷 전송 성공. 매트가 셧다운되지 않았다면, 다음 단계로 이동합니다.');
+
+            // Authentication succeeded, proceed to state synchronization
+            await this.handleSetTargetTemperature(MIN_TEMP); // OFF 명령을 다시 보내 강제로 끔 (혹시 15도로 켜졌다면)
+            await this.readCurrentState();
+
         } catch (error) {
-            this.log.error(`[BLE] 특성 탐색 오류: ${error.message}. UUID를 확인하세요.`);
-            this.disconnectDevice(`특성 탐색 오류: ${error.message}`, true);
+            this.log.error(`[BLE] 매트 연결 또는 인증 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
+            // 연결 실패 시 장치 캐시를 지우고 재시도
+            this.disconnectDevice(`연결/인증 실패: ${error.message}`, true);
         }
     }
+
+    // discoverCharacteristics 함수는 connectDevice에 통합되어 제거되었습니다.
 
     async readCurrentState() {
         try {
