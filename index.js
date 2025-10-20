@@ -71,7 +71,7 @@ class HeatingMatAccessory {
         return buffer;
     }
 
-    // 초기화 패킷 전송 (재활성화 및 지연 추가)
+    // 초기화 패킷 전송 (사용하지 않음. 연결 끊김 문제로 인해 주석 처리된 로직)
     async sendInitializationPacket() {
         if (!this.setCharacteristic || !this.isConnected) {
             this.log.warn('[Init] 초기화 특성이 없거나 연결되어 있지 않습니다. 초기화 건너뛰기.');
@@ -81,6 +81,7 @@ class HeatingMatAccessory {
         try {
             const initPacket = Buffer.from(this.initPacketHex, 'hex');
             this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
+            // 이전 로그에서 이 writeValue 호출이 ATT 0x0e 오류를 발생시켰습니다.
             await this.setCharacteristic.writeValue(initPacket);
 
             // 장치가 패킷을 처리할 시간을 줍니다.
@@ -400,9 +401,7 @@ class HeatingMatAccessory {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
                 if (this.setCharacteristic) {
-                    // ** 초기화 패킷 전송을 재활성화합니다. **
-                    // 이 과정이 없으면 장치가 제어 명령을 거부하고 연결을 끊는 것으로 보입니다.
-                    await this.sendInitializationPacket();
+                    this.log.warn('[Init] 설정된 초기화 특성이 있으나, 연결 끊김 문제(ATT 0x0e) 해결을 위해 초기화 패킷 전송을 건너뜁니다.');
                 }
 
                 await this.readCurrentState();
