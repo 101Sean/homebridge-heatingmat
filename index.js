@@ -48,9 +48,10 @@ class HeatingMatAccessory {
         this.setTempTimeout = null;
         this.lastSentLevel = -1;
 
+        // 초기 상태를 MIN_TEMP로 설정하여 장치 상태를 HomeKit이 관리하도록 함
         this.currentState = {
-            targetTemp: MIN_TEMP,
-            currentTemp: MIN_TEMP,
+            targetTemp: DEFAULT_HEAT_TEMP, // 시작 시 목표 온도는 마지막 사용 온도로 설정 (HomeKit이 제어 시작 시 켜지도록)
+            currentTemp: MIN_TEMP, // 실제 측정 온도는 최소값으로 시작
             currentHeatingCoolingState: this.Characteristic.CurrentHeatingCoolingState.OFF,
             timerHours: 0,
             timerOn: false,
@@ -159,6 +160,7 @@ class HeatingMatAccessory {
             .onSet(this.handleSetTargetTemperature.bind(this))
             .onGet(() => this.currentState.targetTemp);
 
+        // CurrentTemperature는 장치에서 실시간으로 읽지 못하므로, 목표 온도로 간주
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentTemperature)
             .setProps({ minValue: MIN_TEMP, maxValue: MAX_TEMP, minStep: 1 })
             .onGet(() => this.currentState.currentTemp);
@@ -247,7 +249,9 @@ class HeatingMatAccessory {
                 await this.safeWriteValue(this.tempCharacteristic, packet);
                 this.lastSentLevel = level; // 성공 시 마지막 전송 레벨 업데이트
 
+                // --- HomeKit 상태 업데이트 (성공 시 즉시 반영) ---
                 this.currentState.targetTemp = value;
+                // HomeKit에서 CurrentTemperature는 목표 온도로 표시 (실제 읽기 불가)
                 this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
                 this.currentState.currentHeatingCoolingState =
                     level > 0 ? this.Characteristic.CurrentHeatingCoolingState.HEAT : this.Characteristic.CurrentHeatingCoolingState.OFF;
@@ -262,6 +266,7 @@ class HeatingMatAccessory {
                 this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
                     : this.Characteristic.TargetHeatingCoolingState.HEAT);
+                // ----------------------------------------------------
 
             } catch (error) {
                 this.log.error(`[Temp Command] BLE 쓰기 오류: ${error.message}`);
@@ -352,6 +357,7 @@ class HeatingMatAccessory {
         if (this.timeCharacteristic && this.isConnected) {
             try {
                 await this.safeWriteValue(this.timeCharacteristic, packet);
+                // 성공 시 HomeKit 상태 업데이트는 handleSetTimerHours/handleTimerSwitch에서 이미 수행됨
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
@@ -499,102 +505,15 @@ class HeatingMatAccessory {
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
-                // BLE Notification/Indication 활성화 및 핸들러 구현
-                try {
-                    this.log.info('[BLE] 온도 및 타이머 특성 Notification 활성화 시도...');
-
-                    // setCharacteristic (상태 응답용) Notification 활성화
-                    if (this.setCharacteristic) {
-                        await this.setCharacteristic.startNotifications();
-                        this.setCharacteristic.on('valuechanged', (data) => {
-                            this.log.debug(`[BLE Notify] SET 특성 데이터 수신: ${data.toString('hex')}`);
-                            // HomeActivity에서 'a55aFFFF' 응답이 이 특성으로 올 가능성을 대비합니다.
-                            // 전체 상태를 다시 읽어 HomeKit과 매트 상태를 완전히 동기화합니다.
-                            this.readCurrentState();
-                            this.log.info('[Notify] SET 특성에서 상태 알림 수신. 전체 상태를 재동기화합니다.');
-                        });
-                    }
-
-                    // 온도 핸들러
-                    await this.tempCharacteristic.startNotifications();
-                    this.tempCharacteristic.on('valuechanged', (data) => {
-                        this.log.debug(`[BLE Notify] 온도 데이터 수신: ${data.toString('hex')}`);
-
-                        // *** [FIX: 인덱스 1과 3으로 수정] ***
-                        // 알림 패킷 구조가 [Checksum, Level, Checksum, Level]로 추정
-                        const levelLeft = data.readUInt8(1); // 좌측 레벨 (수정됨)
-                        const levelRight = data.readUInt8(3); // 우측 레벨 (수정됨)
-
-                        const currentLevel = Math.max(levelLeft, levelRight);
-                        const newTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
-
-                        // Notification 수신 시 lastSentLevel도 업데이트하여 상태 동기화
-                        this.lastSentLevel = currentLevel;
-
-                        // 1. Target Temperature 업데이트
-                        if (this.currentState.targetTemp !== newTemp) {
-                            this.currentState.targetTemp = newTemp;
-                            this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, newTemp);
-                            this.log.info(`[Notify] Target 온도 업데이트 (수동 조작): ${newTemp}°C`);
-                        }
-
-                        // 2. Heating/Cooling State 업데이트
-                        const newTargetState = currentLevel > 0
-                            ? this.Characteristic.TargetHeatingCoolingState.HEAT
-                            : this.Characteristic.TargetHeatingCoolingState.OFF;
-
-                        const newCurrentState = currentLevel > 0
-                            ? this.Characteristic.CurrentHeatingCoolingState.HEAT
-                            : this.Characteristic.CurrentHeatingCoolingState.OFF;
-
-                        if (this.currentState.currentHeatingCoolingState !== newCurrentState) {
-                            this.currentState.currentHeatingCoolingState = newCurrentState;
-                            this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, newCurrentState);
-                            this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, newTargetState);
-                            this.log.info(`[Notify] 전원 상태 업데이트 (수동 조작): ${newCurrentState === this.Characteristic.CurrentHeatingCoolingState.HEAT ? 'HEAT' : 'OFF'}`);
-                        }
-
-                        // 3. Current Temperature 업데이트 (측정 온도)
-                        if (this.currentState.currentTemp !== newTemp) {
-                            this.currentState.currentTemp = newTemp;
-                            this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, newTemp);
-                            this.log.info(`[Notify] 실시간 Current 온도 업데이트: ${newTemp}°C`);
-                        }
-
-                        // 4. lastHeatTemp 업데이트
-                        if (currentLevel > 0) {
-                            this.currentState.lastHeatTemp = newTemp;
-                        }
-                    });
-
-                    // 타이머 핸들러 (기존 로직 유지 - 주 동기화 채널)
-                    await this.timeCharacteristic.startNotifications();
-                    this.timeCharacteristic.on('valuechanged', (data) => {
-                        this.log.debug(`[BLE Notify] 타이머 데이터 수신: ${data.toString('hex')}`);
-
-                        const currentHoursLeft = data.readUInt8(1);
-                        const currentHoursRight = data.readUInt8(3);
-                        const currentHours = Math.max(currentHoursLeft, currentHoursRight);
-
-                        if (this.currentState.timerHours !== currentHours) {
-                            this.currentState.timerHours = currentHours;
-                            this.currentState.timerOn = currentHours > 0;
-
-                            this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
-                            this.timerService.updateCharacteristic(this.Characteristic.Brightness, currentHours * BRIGHTNESS_PER_HOUR);
-                            this.log.info(`[Notify] 실시간 타이머 업데이트: ${currentHours}시간`);
-                        }
-                    });
-
-                    this.log.info('[BLE] Notification 활성화 성공.');
-
-                } catch (e) {
-                    this.log.error(`[BLE Notify] Notification 활성화 실패: ${e.message}. 연결 안정성이 저하될 수 있습니다.`);
+                // --- 수정: 초기화 특성(`charSetUuid`)이 설정된 경우 초기화 패킷을 전송하여 장치에 제어 시작 알림 ---
+                if (this.setCharacteristic) {
+                    await this.sendInitializationPacket();
                 }
+                // --------------------------------------------------------------------------------------------------
 
-                await sleep(500);
+                // 로그 분석 결과, Characteristic Read 및 Notification이 불안정하거나 지원되지 않아 제거합니다.
+                // HomeKit 상태는 Homebridge가 마지막으로 보낸 명령을 따라갑니다.
 
-                await this.readCurrentState();
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
                 this.disconnectDevice(true);
@@ -606,54 +525,12 @@ class HeatingMatAccessory {
         }
     }
 
+    /**
+     * 로그 분석 결과, Characteristic Read 및 Notification이 불안정하거나 지원되지 않아 제거되었습니다.
+     * HomeKit은 마지막 전송 상태에 의존합니다.
+     */
     async readCurrentState() {
-        try {
-            const tempValue = await this.tempCharacteristic.readValue();
-
-            const levelLeft = tempValue.readUInt8(1);
-            const levelRight = tempValue.readUInt8(3);
-            const currentLevel = Math.max(levelLeft, levelRight);
-
-            const currentTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
-
-            this.lastSentLevel = currentLevel;
-
-            this.currentState.targetTemp = currentTemp;
-            this.currentState.currentTemp = currentTemp;
-            this.currentState.currentHeatingCoolingState = currentLevel > 0
-                ? this.Characteristic.CurrentHeatingCoolingState.HEAT
-                : this.Characteristic.CurrentHeatingCoolingState.OFF;
-            if (currentLevel > 0) {
-                this.currentState.lastHeatTemp = currentTemp;
-            }
-
-            this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, this.currentState.targetTemp);
-            this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
-            this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
-            this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
-                ? this.Characteristic.TargetHeatingCoolingState.OFF
-                : this.Characteristic.TargetHeatingCoolingState.HEAT);
-
-            this.log.debug(`[Sync] 온도 상태 동기화 완료: Level ${currentLevel} -> ${currentTemp}°C. (좌우 중 최대 레벨 반영)`);
-
-            const timeValue = await this.timeCharacteristic.readValue();
-
-            const currentHoursLeft = timeValue.readUInt8(1);
-            const currentHoursRight = timeValue.readUInt8(3);
-            const currentHours = Math.max(currentHoursLeft, currentHoursRight);
-
-
-            this.currentState.timerHours = currentHours;
-            this.currentState.timerOn = currentHours > 0;
-
-            this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
-            this.timerService.updateCharacteristic(this.Characteristic.Brightness, currentHours * BRIGHTNESS_PER_HOUR);
-
-            this.log.debug(`[Sync] 타이머 상태 동기화 완료: ${currentHours} 시간. (좌우 중 최대 시간 반영)`);
-
-        } catch (error) {
-            this.log.warn(`[Sync] 초기 상태 읽기 실패 (READ 속성이 없거나 데이터 해석 오류): ${error.message}`);
-        }
+        this.log.debug('[Sync] readCurrentState 함수는 불안정성으로 인해 비활성화되었습니다. HomeKit은 마지막 전송 상태에 의존합니다.');
     }
 
     disconnectDevice(resetDevice = false) {
