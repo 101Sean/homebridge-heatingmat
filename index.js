@@ -38,7 +38,7 @@ class HeatingMatAccessory {
         this.name = config.name || '스마트 히팅 매트';
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
-        this.setCharacteristic = null; // 초기화 특성
+        this.setCharacteristic = null;
         this.device = null;
         this.adapter = null;
         this.isConnected = false;
@@ -58,6 +58,33 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
+    async safeWriteValue(characteristic, packet, maxRetries = 2, delayMs = 300) {
+        if (!this.isConnected) {
+            throw new Error("Device not connected.");
+        }
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                await characteristic.writeValue(packet);
+                this.log.debug(`[BLE Write] 쓰기 성공 (시도: ${attempt}/${maxRetries}).`);
+
+                await sleep(500);
+
+                return true;
+            } catch (error) {
+                this.log.warn(`[BLE Write] 쓰기 오류 발생 (시도: ${attempt}/${maxRetries}): ${error.message}`);
+
+                if (attempt === maxRetries) {
+                    this.log.error(`[BLE Write] 최종 쓰기 실패. 연결 해제 및 재시도 루프 시작.`);
+                    this.disconnectDevice();
+                    throw error;
+                }
+
+                await sleep(delayMs);
+            }
+        }
+    }
+
     createControlPacket(value) {
         const dataByte = value;
         const checkSum = (0xFF - dataByte) & 0xFF;
@@ -71,7 +98,6 @@ class HeatingMatAccessory {
         return buffer;
     }
 
-    // 초기화 패킷 전송 (사용하지 않음. 연결 끊김 문제로 인해 주석 처리된 로직)
     async sendInitializationPacket() {
         if (!this.setCharacteristic || !this.isConnected) {
             this.log.warn('[Init] 초기화 특성이 없거나 연결되어 있지 않습니다. 초기화 건너뛰기.');
@@ -81,16 +107,13 @@ class HeatingMatAccessory {
         try {
             const initPacket = Buffer.from(this.initPacketHex, 'hex');
             this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
-            // 이전 로그에서 이 writeValue 호출이 ATT 0x0e 오류를 발생시켰습니다.
             await this.setCharacteristic.writeValue(initPacket);
 
-            // 장치가 패킷을 처리할 시간을 줍니다.
             await sleep(500);
 
             this.log.info('[Init] 초기화 패킷 전송 성공.');
         } catch (error) {
             this.log.error(`[Init] 초기화 패킷 전송 오류: ${error.message}`);
-            // 초기화에 실패하면 제어 명령도 실패하므로 연결을 끊고 재시도합니다.
             this.disconnectDevice(true);
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
@@ -168,7 +191,7 @@ class HeatingMatAccessory {
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
-                await this.tempCharacteristic.writeValue(packet);
+                await this.safeWriteValue(this.tempCharacteristic, packet);
 
                 this.currentState.targetTemp = value;
                 this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
@@ -187,7 +210,6 @@ class HeatingMatAccessory {
 
             } catch (error) {
                 this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
-                this.disconnectDevice();
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
@@ -255,10 +277,9 @@ class HeatingMatAccessory {
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
-                await this.timeCharacteristic.writeValue(packet);
+                await this.safeWriteValue(this.timeCharacteristic, packet);
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
-                this.disconnectDevice();
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
@@ -266,7 +287,6 @@ class HeatingMatAccessory {
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
     }
-
 
     initNodeBle() {
         this.initializeBleAdapter();
@@ -334,10 +354,8 @@ class HeatingMatAccessory {
                         await this.connectDevice();
                     } else {
                         if (deviceAddresses.length > 0) {
-                            // 주변 장치가 있어도 타겟이 없을 경우 debug로 출력
                             this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
                         } else {
-                            // 주변 장치 자체가 없을 경우 debug로 출력
                             this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
                         }
                     }
@@ -389,7 +407,6 @@ class HeatingMatAccessory {
             const service = await gatt.getPrimaryService(this.serviceUuid);
             this.log.debug(`[BLE] 서비스 ${this.serviceUuid} 발견 성공.`);
 
-            // 초기화 특성
             if (this.charSetUuid) {
                 this.setCharacteristic = await service.getCharacteristic(this.charSetUuid);
             }
