@@ -61,10 +61,10 @@ class HeatingMatAccessory {
         const { createBluetooth } = NodeBle;
 
         try {
-            const { bluetooth, destroy } = createBluetooth(this.adapterId);
+            const { bluetooth: bluetoothPromise, destroy } = createBluetooth(this.adapterId);
             this.destroyBluetooth = destroy;
 
-            bluetooth.then(bt => {
+            bluetoothPromise.then(bt => {
                 this.initializeBleAdapter(bt);
                 this.startScanningLoop();
             }).catch(e => {
