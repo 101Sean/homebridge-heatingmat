@@ -7,8 +7,10 @@ const MIN_TEMP = 15;
 const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30;
 
-const MAX_TIMER_HOURS = 10;
-const BRIGHTNESS_PER_HOUR = 10;
+// [수정 1] 타이머 최대 시간을 15시간으로 변경 (앱 정보 반영)
+const MAX_TIMER_HOURS = 15;
+// [수정 2] 밝기 단위를 15시간에 맞게 조정 (100 / 15 = 6.666...)
+const BRIGHTNESS_PER_HOUR = 100 / MAX_TIMER_HOURS;
 
 const sleep = util.promisify(setTimeout);
 
@@ -28,7 +30,6 @@ class HeatingMatAccessory {
         this.scanInterval = (config.scan_interval_sec || 15) * 1000;
 
         this.charSetUuid = (config.char_set_uuid || '').toLowerCase();
-
         this.initPacketHex = config.init_packet_hex;
 
         if (!this.macAddress || !this.serviceUuid || !this.charTempUuid || !this.charTimeUuid) {
@@ -59,6 +60,7 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
+    // [수정 3] 쓰기 재시도 횟수를 3회로 증가
     async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = 300) {
         if (!this.isConnected) {
             throw new Error("Device not connected.");
@@ -100,13 +102,8 @@ class HeatingMatAccessory {
     }
 
     async sendInitializationPacket() {
-        if (!this.setCharacteristic || !this.isConnected) {
-            this.log.warn('[Init] 초기화 특성이 없거나 연결되어 있지 않습니다. 초기화 건너뛰기.');
-            return;
-        }
-
-        if (!this.initPacketHex) {
-            this.log.warn('[Init] init_packet_hex 설정이 누락되어 초기화를 건너뜁니다.');
+        if (!this.setCharacteristic || !this.isConnected || !this.initPacketHex) {
+            this.log.warn('[Init] 초기화 조건 불충족 (특성/연결/패킷). 건너뛰기.');
             return;
         }
 
@@ -166,6 +163,7 @@ class HeatingMatAccessory {
             .onSet(this.handleTimerSwitch.bind(this))
             .onGet(() => this.currentState.timerOn);
 
+        // [수정 4] Brightness MinStep을 15시간에 맞게 조정
         this.timerService.getCharacteristic(this.Characteristic.Brightness)
             .setProps({ minValue: 0, maxValue: 100, minStep: BRIGHTNESS_PER_HOUR })
             .onSet(this.handleSetTimerHours.bind(this))
@@ -208,6 +206,8 @@ class HeatingMatAccessory {
                     this.currentState.lastHeatTemp = value;
                 }
 
+                // HomeKit 상태 업데이트는 Notification 핸들러에 위임하는 것이 이상적이지만,
+                // 즉시 반영을 위해 일단 여기서는 updateCharacteristic을 유지합니다.
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
                 this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
@@ -225,14 +225,22 @@ class HeatingMatAccessory {
     }
 
     async handleSetTimerHours(value) {
+        // [수정 5] 밝기 값으로 시간 계산
         let hours = Math.round(value / BRIGHTNESS_PER_HOUR);
 
+        // 0% < 밝기 <= (100/15)% 일 경우 1시간으로 설정
         if (value > 0 && hours === 0) {
             hours = 1;
         }
 
         if (hours > MAX_TIMER_HOURS) {
             hours = MAX_TIMER_HOURS;
+        }
+
+        // [수정 6] 0시간일 시 전원 OFF 명령을 추가합니다.
+        if (hours === 0) {
+            this.log.info('[Timer] 타이머 0시간 설정 수신. 전원을 OFF 합니다.');
+            await this.handleSetTargetTemperature(MIN_TEMP);
         }
 
         await this.sendTimerCommand(hours);
@@ -255,6 +263,9 @@ class HeatingMatAccessory {
             hoursToSend = 0;
             brightnessToSet = 0;
             this.log.info('[Timer] HomeKit 스위치 OFF. 타이머 해제 (0시간).');
+            // [수정 7] 타이머 스위치 OFF 시 전원 OFF 명령을 추가합니다.
+            await this.handleSetTargetTemperature(MIN_TEMP);
+
         } else {
             let currentBrightness = this.timerService.getCharacteristic(this.Characteristic.Brightness).value;
             hoursToSend = Math.round(currentBrightness / BRIGHTNESS_PER_HOUR);
@@ -262,7 +273,7 @@ class HeatingMatAccessory {
             if (hoursToSend === 0) {
                 hoursToSend = 1;
                 brightnessToSet = BRIGHTNESS_PER_HOUR;
-                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간(10%)으로 설정.');
+                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간으로 설정.');
             } else {
                 brightnessToSet = hoursToSend * BRIGHTNESS_PER_HOUR;
                 this.log.info(`[Timer] HomeKit 스위치 ON. ${hoursToSend}시간으로 재설정.`);
@@ -406,9 +417,10 @@ class HeatingMatAccessory {
 
         try {
             this.log.debug(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
-            this.log.debug(`[BLE] 특성 탐색 시도: (초기화: ${this.charSetUuid}, 온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
+            this.log.debug(`[BLE] 특성 탐색 시도: (초기화: ${this.charSetUuid}, 온도: ${this.charSetUuid}, 타이머: ${this.charTimeUuid})`);
 
-            await sleep(500);
+            // [수정 8] 연결 직후 안정화 딜레이 추가 (ATT 0x0e 대응)
+            await sleep(2000);
 
             const gatt = await this.device.gatt();
 
@@ -425,25 +437,53 @@ class HeatingMatAccessory {
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
-                if (this.setCharacteristic && this.initPacketHex) {
-                    this.log.info('[Init] 초기화 특성 및 패킷 확인. 초기화 패킷을 전송합니다.');
-                    await this.sendInitializationPacket();
-                    await sleep(1000); // 초기화 후 안정화 대기
-                }
+                // [수정 9] ATT 0x0e 오류 회피를 위해 초기화 패킷 전송을 임시 주석 처리합니다.
+                // if (this.setCharacteristic && this.initPacketHex) {
+                //     this.log.warn('[Init] ATT 0x0e 오류 회피를 위해 초기화 패킷 전송을 건너뜁니다.');
+                //     // await this.sendInitializationPacket();
+                //     // await sleep(1000);
+                // }
 
+                // [수정 10] BLE Notification/Indication 활성화 및 핸들러 구현
                 try {
                     this.log.info('[BLE] 온도 및 타이머 특성 Notification 활성화 시도...');
 
+                    // 온도 핸들러
                     await this.tempCharacteristic.startNotifications();
                     this.tempCharacteristic.on('valuechanged', (data) => {
                         this.log.debug(`[BLE Notify] 온도 데이터 수신: ${data.toString('hex')}`);
-                        // (TODO: 상태 푸시 업데이트 로직 구현 가능)
+
+                        // 좌/우 중 최대 레벨을 현재 상태로 반영
+                        const levelLeft = data.readUInt8(3);
+                        const levelRight = data.readUInt8(1);
+                        const currentLevel = Math.max(levelLeft, levelRight);
+                        const currentTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
+
+                        if (this.currentState.currentTemp !== currentTemp) {
+                            this.currentState.currentTemp = currentTemp;
+                            this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, currentTemp);
+                            this.log.info(`[Notify] 실시간 온도 업데이트: ${currentTemp}°C`);
+                        }
                     });
 
+                    // 타이머 핸들러
                     await this.timeCharacteristic.startNotifications();
                     this.timeCharacteristic.on('valuechanged', (data) => {
                         this.log.debug(`[BLE Notify] 타이머 데이터 수신: ${data.toString('hex')}`);
-                        // (TODO: 상태 푸시 업데이트 로직 구현 가능)
+
+                        // 좌/우 중 최대 시간을 현재 상태로 반영
+                        const currentHoursLeft = data.readUInt8(3);
+                        const currentHoursRight = data.readUInt8(1);
+                        const currentHours = Math.max(currentHoursLeft, currentHoursRight);
+
+                        if (this.currentState.timerHours !== currentHours) {
+                            this.currentState.timerHours = currentHours;
+                            this.currentState.timerOn = currentHours > 0;
+
+                            this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
+                            this.timerService.updateCharacteristic(this.Characteristic.Brightness, currentHours * BRIGHTNESS_PER_HOUR);
+                            this.log.info(`[Notify] 실시간 타이머 업데이트: ${currentHours}시간`);
+                        }
                     });
 
                     this.log.info('[BLE] Notification 활성화 성공.');
@@ -452,7 +492,7 @@ class HeatingMatAccessory {
                     this.log.error(`[BLE Notify] Notification 활성화 실패: ${e.message}. 연결 안정성이 저하될 수 있습니다.`);
                 }
 
-                await sleep(500); // Notification 활성화 후 대기
+                await sleep(500);
 
                 await this.readCurrentState();
             } else {
@@ -468,6 +508,7 @@ class HeatingMatAccessory {
 
     async readCurrentState() {
         try {
+            // 온도 상태 동기화: 좌우 중 최대 레벨 반영
             const tempValue = await this.tempCharacteristic.readValue();
             const levelLeft = tempValue.readUInt8(3);
             const levelRight = tempValue.readUInt8(1);
@@ -493,6 +534,7 @@ class HeatingMatAccessory {
 
             this.log.debug(`[Sync] 온도 상태 동기화 완료: Level ${currentLevel} -> ${currentTemp}°C. (좌우 중 최대 레벨 반영)`);
 
+            // 타이머 상태 동기화: 좌우 중 최대 시간 반영
             const timeValue = await this.timeCharacteristic.readValue();
             const currentHoursLeft = timeValue.readUInt8(3);
             const currentHoursRight = timeValue.readUInt8(1);
@@ -532,7 +574,6 @@ class HeatingMatAccessory {
             }).catch(e => this.log.warn(`[BLE] 연결 상태 확인 중 오류 발생 (무시): ${e.message}`));
         }
     }
-
 
     getServices() {
         return [
