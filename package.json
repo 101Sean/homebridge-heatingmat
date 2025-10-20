@@ -6,7 +6,7 @@
   "main": "index.js",
   "engines": {
     "homebridge": ">=1.0.0",
-    "node": ">=14.17.0"
+    "node": ">=18.0.0"
   },
   "keywords": [
     "homebridge",
@@ -16,9 +16,14 @@
     "mattress"
   ],
   "dependencies": {
-    "homebridge": "^1.11.0",
-    "noble": "^1.9.1",
+    "@abandonware/noble": "^1.9.2",
     "node-ble": "^1.13.0",
     "node.js": "^0.0.1-security"
+  },
+  "peerDependencies": {
+    "homebridge": ">=1.0.0"
+  },
+  "devDependencies": {
+    "homebridge": ">=1.0.0"
   }
 }
