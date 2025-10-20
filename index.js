@@ -393,7 +393,10 @@ class HeatingMatAccessory {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
                 if (this.setCharacteristic) {
-                    await this.sendInitializationPacket();
+                    // ** [수정] 초기화 패킷 전송이 즉시 연결 해제를 유발하는 것으로 확인되어 주석 처리함.
+                    // 장치가 초기화 패킷 없이도 통신을 허용하는지 확인합니다.
+                    this.log.warn('[Init Skip] 연결 해제 문제(a55affff 전송 직후)로 인해 초기화 패킷 전송을 건너뛰고 상태 동기화를 시도합니다.');
+                    // await this.sendInitializationPacket();
                 }
 
                 await this.readCurrentState();
