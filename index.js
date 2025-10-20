@@ -112,22 +112,26 @@ class HeatingMatAccessory {
 
     /**
      * 싱글 모드 장치를 위해 좌/우 영역에 동일한 제어 값을 포함하는 패킷을 생성합니다.
+     * * [수정] 일반적인 4바이트 제어 패킷 구조 (Level, Level, Padding, Padding)로 변경되었습니다.
      * @param {number} value 제어 레벨 (0-7 또는 타이머 시간)
      * @returns {Buffer} 4바이트 제어 패킷
      */
     createControlPacket(value) {
-        const dataByte = value;
-        const checkSum = (0xFF - dataByte) & 0xFF;
+        const dataByte = value; // Level (0-7 또는 Timer Hours)
 
         const buffer = Buffer.alloc(4);
 
-        // [싱글 모드 통합] 좌측 영역 (Left Zone)
+        // 1. 좌측 영역 (Left Zone) - 제어 레벨
         buffer.writeUInt8(dataByte, 0);
-        buffer.writeUInt8(checkSum, 1);
 
-        // [싱글 모드 통합] 우측 영역 (Right Zone) - 좌측과 동일한 값 복사
-        buffer.writeUInt8(dataByte, 2);
-        buffer.writeUInt8(checkSum, 3);
+        // 2. 우측 영역 (Right Zone) - 싱글 모드이므로 좌측과 동일한 값 복사
+        buffer.writeUInt8(dataByte, 1);
+
+        // 3 & 4. 나머지 2바이트는 0x00으로 패딩 (대부분의 4바이트 제어 특성에서 요구되는 형태)
+        buffer.writeUInt8(0x00, 2);
+        buffer.writeUInt8(0x00, 3);
+
+        this.log.debug(`[Packet] Level ${value} -> 패킷 생성: ${buffer.toString('hex')}`);
 
         return buffer;
     }
@@ -167,8 +171,7 @@ class HeatingMatAccessory {
             return;
         }
 
-        // [수정] 싱글 모드 장치에서는 주로 첫 번째 바이트(인덱스 0)에 상태 값이 옵니다.
-        // 듀얼 모드 기기의 Left Zone에 해당하는 값으로 간주하고 사용합니다.
+        // 싱글 모드 장치에서는 주로 첫 번째 바이트(인덱스 0)에 상태 값이 옵니다.
         let level = data.readUInt8(0);
 
         this.log.debug(`[Notify] 패킷 감지 (${data.toString('hex')}). Level을 인덱스 0에서 읽습니다: ${level}`);
@@ -211,8 +214,7 @@ class HeatingMatAccessory {
             return;
         }
 
-        // [수정] 싱글 모드 장치에서는 주로 첫 번째 바이트(인덱스 0)에 타이머 시간이 옵니다.
-        // 듀얼 모드 기기의 Left Zone에 해당하는 값으로 간주하고 사용합니다.
+        // 싱글 모드 장치에서는 주로 첫 번째 바이트(인덱스 0)에 타이머 시간이 옵니다.
         let hours = data.readUInt8(0);
         this.log.debug(`[Notify] 패킷 감지 (${data.toString('hex')}). Hours를 인덱스 0에서 읽습니다: ${hours}`);
 
