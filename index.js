@@ -1,4 +1,4 @@
-const noble = require('noble');
+const noble = require('noble'); // <--- 오리지널 noble 사용 유지
 const util = require('util');
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
@@ -128,7 +128,9 @@ class HeatingMatAccessory {
             .onGet(() => {
                 return this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
                     ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT;
+                    : this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.HEAT
+                        ? this.Characteristic.TargetHeatingCoolingState.HEAT
+                        : this.Characteristic.TargetHeatingCoolingState.OFF; // Fallback
             });
 
         this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
@@ -357,7 +359,7 @@ class HeatingMatAccessory {
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
 
-            // **[수정 지점 1] 안정화를 위해 1000ms -> 2000ms 대기 시간을 늘립니다.**
+            // [수정 지점 1] 안정화를 위해 1000ms -> 2000ms 대기 시간을 늘립니다.
             this.log.debug('[BLE] 연결 성공 후 안정화를 위해 2000ms 대기...');
             await sleep(2000);
 
@@ -394,7 +396,7 @@ class HeatingMatAccessory {
                 await this.setupNotifications();
                 await this.readCurrentState();
 
-                // **[수정 지점 2] 초기 상태 읽기 후, 전원이 꺼져 있으면 강제로 타이머를 1시간 설정하여 연결 끊김 방지.**
+                // [수정 지점 2] 초기 상태 읽기 후, 전원이 꺼져 있으면 강제로 타이머를 1시간 설정하여 연결 끊김 방지.
                 if (this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF) {
                     this.log.warn(`[Init] 장치 전원이 OFF 상태로 감지됨. 연결 유지 및 테스트를 위해 타이머를 1시간으로 강제 설정합니다.`);
                     await this.sendTimerCommand(1); // 1시간 설정
