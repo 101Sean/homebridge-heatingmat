@@ -1,4 +1,4 @@
-const NodeBle = require('node-ble');
+const noble = require('noble');
 const util = require('util');
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
@@ -20,27 +20,30 @@ class HeatingMatAccessory {
         this.Characteristic = this.api.hap.Characteristic;
 
         this.macAddress = (config.mac_address || '').toLowerCase().replace(/[^0-9a-f]/g, '');
-        this.serviceUuid = (config.service_uuid || '').toLowerCase();
-        this.charTempUuid = (config.char_temp_uuid || '').toLowerCase();
-        this.charTimeUuid = (config.char_timer_uuid || '').toLowerCase();
+        this.serviceUuid = (config.service_uuid || '').toLowerCase().replace(/-/g, '');
+        this.charTempUuid = (config.char_temp_uuid || '').toLowerCase().replace(/-/g, '');
+        this.charTimeUuid = (config.char_timer_uuid || '').toLowerCase().replace(/-/g, '');
 
         this.adapterId = config.adapter_id || 'hci0';
         this.scanInterval = (config.scan_interval_sec || 15) * 1000;
 
-        this.charSetUuid = (config.char_set_uuid || '').toLowerCase();
+        this.charSetUuid = (config.char_set_uuid || '').toLowerCase().replace(/-/g, '');
         this.initPacketHex = config.init_packet_hex;
+
+        this.manufacturerId = config.manufacturer_id_hex ? parseInt(config.manufacturer_id_hex, 16) : null;
+        this.pairingFlagByteIndex = config.pairing_flag_byte_index === undefined ? null : config.pairing_flag_byte_index;
+        this.pairingFlagValue = config.pairing_flag_value === undefined ? null : config.pairing_flag_value;
 
         if (!this.macAddress || !this.serviceUuid || !this.charTempUuid || !this.charTimeUuid) {
             this.log.error('config.json에 필수 설정(mac_address, service_uuid, char_temp_uuid, char_timer_uuid)이 누락되었습니다.');
             return;
         }
 
-        this.name = config.name || '스마트 히팅 매트';
+        this.name = config.name || '스마트 매트';
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
         this.setCharacteristic = null;
-        this.device = null;
-        this.adapter = null;
+        this.peripheral = null;
         this.isConnected = false;
 
         this.isScanningLoopActive = false;
@@ -55,20 +58,20 @@ class HeatingMatAccessory {
         };
 
         this.initServices();
-        this.initNodeBle();
+        this.initNoble();
     }
 
     async safeWriteValue(characteristic, packet, maxRetries = 2, delayMs = 300) {
-        if (!this.isConnected) {
-            throw new Error("Device not connected.");
+        if (!this.isConnected || !characteristic) {
+            throw new Error("Device not connected or characteristic invalid.");
         }
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                await characteristic.writeValue(packet);
+                await characteristic.write(packet, true);
                 this.log.debug(`[BLE Write] 쓰기 성공 (시도: ${attempt}/${maxRetries}).`);
 
-                await sleep(500);
+                await sleep(5000);
 
                 return true;
             } catch (error) {
@@ -85,334 +88,130 @@ class HeatingMatAccessory {
         }
     }
 
-    createControlPacket(value) {
-        const dataByte = value;
-        const checkSum = (0xFF - dataByte) & 0xFF;
-
-        const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(dataByte, 0);
-        buffer.writeUInt8(checkSum, 1);
-        buffer.writeUInt8(0x00, 2);
-        buffer.writeUInt8(0x00, 3);
-
-        return buffer;
-    }
-
-    async sendInitializationPacket() {
-        if (!this.setCharacteristic || !this.isConnected) {
-            this.log.warn('[Init] 초기화 특성이 없거나 연결되어 있지 않습니다. 초기화 건너뛰기.');
-            return;
-        }
-
-        try {
-            const initPacket = Buffer.from(this.initPacketHex, 'hex');
-            this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
-            await this.setCharacteristic.writeValue(initPacket);
-
-            await sleep(500);
-
-            this.log.info('[Init] 초기화 패킷 전송 성공.');
-        } catch (error) {
-            this.log.error(`[Init] 초기화 패킷 전송 오류: ${error.message}`);
-            this.disconnectDevice(true);
-            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-        }
-    }
-
-
-    initServices() {
-        this.accessoryInformation = new this.Service.AccessoryInformation()
-            .setCharacteristic(this.Characteristic.Manufacturer, 'Generic Mat')
-            .setCharacteristic(this.Characteristic.Model, 'BLE Heating Mat')
-            .setCharacteristic(this.Characteristic.SerialNumber, this.macAddress);
-
-        this.thermostatService = new this.Service.Thermostat(this.name + ' 온도');
-
-        this.thermostatService.getCharacteristic(this.Characteristic.TargetTemperature)
-            .setProps({ minValue: MIN_TEMP, maxValue: MAX_TEMP, minStep: 5 })
-            .onSet(this.handleSetTargetTemperature.bind(this))
-            .onGet(() => this.currentState.targetTemp);
-
-        this.thermostatService.getCharacteristic(this.Characteristic.CurrentTemperature)
-            .setProps({ minValue: MIN_TEMP, maxValue: MAX_TEMP, minStep: 1 })
-            .onGet(() => this.currentState.currentTemp);
-
-        const targetHeatingCoolingStateCharacteristic = this.thermostatService.getCharacteristic(this.Characteristic.TargetHeatingCoolingState);
-        targetHeatingCoolingStateCharacteristic.setProps({
-            validValues: [this.Characteristic.TargetHeatingCoolingState.OFF, this.Characteristic.TargetHeatingCoolingState.HEAT]
+    initNoble() {
+        noble.on('stateChange', (state) => {
+            if (state === 'poweredOn') {
+                this.log.info('[BLE] Noble 어댑터 켜짐. 스캔 루프 시작.');
+                this.startScanningLoop();
+            } else {
+                this.log.warn(`[BLE] Noble 어댑터 상태 변경: ${state}.`);
+                this.disconnectDevice(true);
+            }
         });
-        targetHeatingCoolingStateCharacteristic
-            .onSet(this.handleSetTargetHeatingCoolingState.bind(this))
-            .onGet(() => {
-                return this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
-                    ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT;
-            });
 
-        this.thermostatService.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
-            .onGet(() => this.currentState.currentHeatingCoolingState);
-
-        this.thermostatService.setCharacteristic(this.Characteristic.TemperatureDisplayUnits, this.Characteristic.TemperatureDisplayUnits.CELSIUS);
-
-        this.timerService = new this.Service.Lightbulb(this.name + ' 타이머 설정');
-
-        this.timerService.getCharacteristic(this.Characteristic.On)
-            .onSet(this.handleTimerSwitch.bind(this))
-            .onGet(() => this.currentState.timerOn);
-
-        this.timerService.getCharacteristic(this.Characteristic.Brightness)
-            .setProps({ minValue: 0, maxValue: 100, minStep: BRIGHTNESS_PER_HOUR })
-            .onSet(this.handleSetTimerHours.bind(this))
-            .onGet(() => this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
-
-        this.timerService.setCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * BRIGHTNESS_PER_HOUR);
-        this.timerService.setCharacteristic(this.Characteristic.On, this.currentState.timerOn);
+        noble.on('discover', this.onDiscover.bind(this));
     }
 
-    async handleSetTargetHeatingCoolingState(value) {
-        if (value === this.Characteristic.TargetHeatingCoolingState.OFF) {
-            this.log.info('[HomeKit] 전원 OFF 명령 수신. Level 0 (15°C)로 설정합니다.');
-            await this.handleSetTargetTemperature(MIN_TEMP);
+    parseManufacturerData(manufacturerData) {
+        let isDeviceFound = false;
+        let isParingState = false;
 
-        } else if (value === this.Characteristic.TargetHeatingCoolingState.HEAT) {
-            this.log.info(`[HomeKit] 전원 ON 명령 수신. 마지막 설정 온도(${this.currentState.lastHeatTemp}°C)로 복구합니다.`);
-            await this.handleSetTargetTemperature(this.currentState.lastHeatTemp);
-        }
-    }
-
-    async handleSetTargetTemperature(value) {
-        let level = TEMP_LEVEL_MAP[Math.round(value / 5) * 5] || 0;
-        if (value < MIN_TEMP) level = 0;
-        if (value >= MAX_TEMP) level = 7;
-
-        const packet = this.createControlPacket(level);
-        this.log.info(`[Temp] HomeKit ${value}°C 설정 -> Level ${level}. **패킷:** ${packet.toString('hex')}`);
-
-
-        if (this.tempCharacteristic && this.isConnected) {
-            try {
-                await this.safeWriteValue(this.tempCharacteristic, packet);
-
-                this.currentState.targetTemp = value;
-                this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
-                this.currentState.currentHeatingCoolingState =
-                    level > 0 ? this.Characteristic.CurrentHeatingCoolingState.HEAT : this.Characteristic.CurrentHeatingCoolingState.OFF;
-
-                if (level > 0) {
-                    this.currentState.lastHeatTemp = value;
-                }
-
-                this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
-                this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
-                this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF
-                    ? this.Characteristic.TargetHeatingCoolingState.OFF
-                    : this.Characteristic.TargetHeatingCoolingState.HEAT);
-
-            } catch (error) {
-                this.log.error(`[Temp] BLE 쓰기 오류: ${error.message}`);
-                throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-            }
-        } else {
-            this.log.warn('[Temp] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
-            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-        }
-    }
-
-    async handleSetTimerHours(value) {
-        let hours = Math.round(value / BRIGHTNESS_PER_HOUR);
-
-        if (value > 0 && hours === 0) {
-            hours = 1;
+        if (!manufacturerData || !this.manufacturerId || this.pairingFlagByteIndex === null || this.pairingFlagValue === null) {
+            return { isDeviceFound: true, isParingState: true };
         }
 
-        if (hours > MAX_TIMER_HOURS) {
-            hours = MAX_TIMER_HOURS;
+        if (manufacturerData.length > 0) {
+            const manufacturerId = manufacturerData.readUInt8(0);
+            isDeviceFound = (manufacturerId & 0xFF) === this.manufacturerId;
         }
 
-        await this.sendTimerCommand(hours);
-
-        this.currentState.timerHours = hours;
-        this.currentState.timerOn = hours > 0;
-
-        const brightnessToSet = hours * BRIGHTNESS_PER_HOUR;
-
-        this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
-        this.timerService.updateCharacteristic(this.Characteristic.Brightness, brightnessToSet);
-        this.log.info(`[Timer] 밝기 ${value}% 수신 -> ${hours} 시간 설정 완료. (HomeKit: ${brightnessToSet}%)`);
-    }
-
-    async handleTimerSwitch(value) {
-        let hoursToSend = 0;
-        let brightnessToSet = 0;
-
-        if (value === false) {
-            hoursToSend = 0;
-            brightnessToSet = 0;
-            this.log.info('[Timer] HomeKit 스위치 OFF. 타이머 해제 (0시간).');
-        } else {
-            let currentBrightness = this.timerService.getCharacteristic(this.Characteristic.Brightness).value;
-            hoursToSend = Math.round(currentBrightness / BRIGHTNESS_PER_HOUR);
-
-            if (hoursToSend === 0) {
-                hoursToSend = 1;
-                brightnessToSet = BRIGHTNESS_PER_HOUR;
-                this.log.info('[Timer] HomeKit 스위치 ON. 시간이 0이므로 1시간(10%)으로 설정.');
-            } else {
-                brightnessToSet = hoursToSend * BRIGHTNESS_PER_HOUR;
-                this.log.info(`[Timer] HomeKit 스위치 ON. ${hoursToSend}시간으로 재설정.`);
-            }
+        if (isDeviceFound && manufacturerData.length > this.pairingFlagByteIndex) {
+            const typeByte = manufacturerData.readUInt8(this.pairingFlagByteIndex);
+            isParingState = (typeByte & 0x0F) === this.pairingFlagValue;
         }
 
-        await this.sendTimerCommand(hoursToSend);
-
-        this.currentState.timerHours = hoursToSend;
-        this.currentState.timerOn = value;
-
-        this.timerService.updateCharacteristic(this.Characteristic.Brightness, brightnessToSet);
+        return { isDeviceFound, isParingState };
     }
 
-    async sendTimerCommand(hours) {
-        const packet = this.createControlPacket(hours);
-        this.log.info(`[Timer] 시간 ${hours} 명령 전송 시도. **패킷:** ${packet.toString('hex')}`);
+    onDiscover(peripheral) {
+        if (this.isConnected) return;
 
-        if (this.timeCharacteristic && this.isConnected) {
-            try {
-                await this.safeWriteValue(this.timeCharacteristic, packet);
-            } catch (error) {
-                this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
-                throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-            }
-        } else {
-            this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
-            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
-        }
-    }
+        const discoveredAddress = peripheral.address.toLowerCase().replace(/[^0-9a-f]/g, '');
 
-    initNodeBle() {
-        this.initializeBleAdapter();
-    }
-
-    async initializeBleAdapter() {
-        try {
-            this.log.info('[BLE] node-ble createBluetooth()를 사용하여 BLE 초기화를 시도합니다.');
-
-            const { bluetooth } = NodeBle.createBluetooth();
-
-            let adapter;
-            if (this.adapterId && this.adapterId !== 'hci0') {
-                adapter = await bluetooth.getAdapter(this.adapterId);
-            } else {
-                adapter = await bluetooth.defaultAdapter();
-            }
-
-            this.adapter = adapter;
-            this.log.info(`[BLE] 어댑터(${this.adapterId}) 초기화 성공. 스캔 루프 시작.`);
-            this.startScanningLoop();
-        } catch (error) {
-            this.log.error(`[BLE] node-ble 초기화 실패. BlueZ 서비스가 실행 중인지, 혹은 권한이 있는지 확인하세요: ${error.message}`);
-        }
-    }
-
-    async startScanningLoop() {
-        if (!this.adapter || this.isScanningLoopActive) {
-            this.log.debug('[BLE] 스캔 루프 시작 조건을 만족하지 못했습니다. (어댑터 없음 또는 이미 실행 중)');
+        if (discoveredAddress !== this.macAddress) {
             return;
         }
 
+        const adData = this.parseManufacturerData(peripheral.advertisement.manufacturerData);
+
+        if (adData.isDeviceFound && adData.isParingState) {
+            this.log.info(`[BLE] 매트 장치 발견 (주소: ${peripheral.address}). 장치 ID 및 페어링 상태 확인됨. 연결 시도.`);
+            noble.stopScanning();
+            this.connectDevice(peripheral);
+        } else {
+            this.log.debug(`[BLE] 매트 장치(${peripheral.address}) 발견. 연결 조건 불일치 (ID: ${adData.isDeviceFound}, 페어링: ${adData.isParingState}). 건너뜀.`);
+        }
+    }
+
+    startScanningLoop() {
+        if (this.isScanningLoopActive) return;
         this.isScanningLoopActive = true;
-        this.log.info('[BLE] 백그라운드 스캔/연결 루프를 시작합니다.');
 
-        while (this.isScanningLoopActive) {
-            if (!this.isConnected) {
-                this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
-                try {
-                    await this.adapter.startDiscovery();
+        const scan = () => {
+            if (!this.isConnected && noble.state === 'poweredOn') {
+                this.log.debug('[BLE] 스캔 시작. 설정된 서비스 UUID로 장치를 찾습니다.');
+                noble.startScanning([this.serviceUuid], false);
 
-                    const targetAddress = this.macAddress.toUpperCase();
-
-                    await sleep(5000);
-                    await this.adapter.stopDiscovery();
-
-                    const deviceAddresses = await this.adapter.devices();
-
-                    let targetDevice = null;
-                    let foundAddress = null;
-
-                    for (const address of deviceAddresses) {
-                        const normalizedAddress = address.toUpperCase().replace(/:/g, '');
-
-                        if (normalizedAddress === targetAddress) {
-                            targetDevice = await this.adapter.getDevice(address);
-                            foundAddress = address;
-                            break;
-                        }
+                setTimeout(() => {
+                    if (noble.state === 'scanning') {
+                        noble.stopScanning();
+                        this.log.debug('[BLE] 스캔 멈춤. 다음 주기 대기.');
                     }
-
-                    if (targetDevice) {
-                        this.device = targetDevice;
-                        this.log.info(`[BLE] 매트 장치 발견: ${foundAddress}`);
-                        await this.connectDevice();
-                    } else {
-                        if (deviceAddresses.length > 0) {
-                            this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
-                        } else {
-                            this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
-                        }
+                    if (this.isScanningLoopActive) {
+                        setTimeout(scan, this.scanInterval);
                     }
-
-                } catch (error) {
-                    this.log.error(`[BLE] 스캔 오류: ${error.message}`);
-                }
-            } else {
-                this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
+                }, 5000); // 5초 스캔 후 중지
+            } else if (this.isScanningLoopActive) {
+                setTimeout(scan, this.scanInterval);
             }
-
-            await sleep(this.scanInterval);
-        }
+        };
+        scan();
     }
 
-    async connectDevice() {
-        if (!this.device || this.isConnected) {
-            return;
-        }
+
+    async connectDevice(peripheral) {
+        if (this.isConnected) return;
+
+        this.peripheral = peripheral;
+
+        this.peripheral.removeAllListeners('disconnect');
+        this.peripheral.on('disconnect', () => {
+            this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
+            this.disconnectDevice();
+            this.startScanningLoop();
+        });
 
         try {
             this.log.info(`[BLE] 매트 연결 시도...`);
-            await this.device.connect();
+            await this.peripheral.connectAsync();
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
-
-            this.device.on('disconnect', () => {
-                this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
-                this.disconnectDevice();
-            });
 
             await this.discoverCharacteristics();
 
         } catch (error) {
             this.log.error(`[BLE] 매트 연결 실패: ${error.message}. 재스캔 루프를 시작합니다.`);
             this.disconnectDevice(true);
+            this.startScanningLoop();
         }
     }
 
     async discoverCharacteristics() {
         try {
             this.log.debug(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
-            this.log.debug(`[BLE] 특성 탐색 시도: (초기화: ${this.charSetUuid}, 온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
 
-            await sleep(500);
+            const { characteristics } = await this.peripheral.discoverAllServicesAndCharacteristicsAsync();
 
-            const gatt = await this.device.gatt();
-
-            const service = await gatt.getPrimaryService(this.serviceUuid);
-            this.log.debug(`[BLE] 서비스 ${this.serviceUuid} 발견 성공.`);
+            let foundChars = {};
+            characteristics.forEach(char => {
+                foundChars[char.uuid] = char;
+            });
 
             if (this.charSetUuid) {
-                this.setCharacteristic = await service.getCharacteristic(this.charSetUuid);
+                this.setCharacteristic = foundChars[this.charSetUuid];
             }
-            this.tempCharacteristic = await service.getCharacteristic(this.charTempUuid);
-            this.timeCharacteristic = await service.getCharacteristic(this.charTimeUuid);
-
+            this.tempCharacteristic = foundChars[this.charTempUuid];
+            this.timeCharacteristic = foundChars[this.charTimeUuid];
 
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
@@ -428,14 +227,13 @@ class HeatingMatAccessory {
             }
         } catch (error) {
             this.log.error(`[BLE] 특성 탐색 오류: ${error.message}.`);
-            this.log.error('[BLE] config.json에 서비스 UUID와 특성 UUID를 전체 128비트 형식으로 정확히 입력했는지 확인해 주세요.');
             this.disconnectDevice(true);
         }
     }
 
     async readCurrentState() {
         try {
-            const tempValue = await this.tempCharacteristic.readValue();
+            const tempValue = await this.tempCharacteristic.readAsync();
             const currentLevel = tempValue.readUInt8(3);
             const currentTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
 
@@ -457,7 +255,7 @@ class HeatingMatAccessory {
 
             this.log.debug(`[Sync] 온도 상태 동기화 완료: Level ${currentLevel} -> ${currentTemp}°C. (읽기 인덱스 3 사용)`);
 
-            const timeValue = await this.timeCharacteristic.readValue();
+            const timeValue = await this.timeCharacteristic.readAsync();
             const currentHours = timeValue.readUInt8(3);
 
             this.currentState.timerHours = currentHours;
@@ -474,24 +272,20 @@ class HeatingMatAccessory {
     }
 
     disconnectDevice(resetDevice = false) {
-        const deviceToDisconnect = this.device;
+        if (this.peripheral && this.isConnected) {
+            this.peripheral.disconnect(() => {
+                this.log.debug('[BLE] peripheral.disconnect() 완료.');
+            });
+        }
 
         this.isConnected = false;
         this.tempCharacteristic = null;
         this.timeCharacteristic = null;
         this.setCharacteristic = null;
-
         if (resetDevice) {
-            this.device = null;
+            this.peripheral = null;
         }
-
-        if (deviceToDisconnect) {
-            deviceToDisconnect.isConnected().then(connected => {
-                if(connected) {
-                    deviceToDisconnect.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
-                }
-            }).catch(e => this.log.warn(`[BLE] 연결 상태 확인 중 오류 발생 (무시): ${e.message}`));
-        }
+        this.startScanningLoop();
     }
 
     getServices() {
@@ -502,6 +296,11 @@ class HeatingMatAccessory {
         ];
     }
 }
+
+noble.Peripheral.prototype.connectAsync = util.promisify(noble.Peripheral.prototype.connect);
+noble.Peripheral.prototype.discoverAllServicesAndCharacteristicsAsync = util.promisify(noble.Peripheral.prototype.discoverAllServicesAndCharacteristics);
+noble.Characteristic.prototype.write = util.promisify(noble.Characteristic.prototype.write);
+noble.Characteristic.prototype.readAsync = util.promisify(noble.Characteristic.prototype.read);
 
 module.exports = (api) => {
     api.registerAccessory('homebridge-heatingmat', 'HeatingMatAccessory', HeatingMatAccessory);
