@@ -61,21 +61,30 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
+    /**
+     * BLE 특성에 값을 쓰는 안전한 함수.
+     * Write Without Response (type: 'command')를 기본으로 사용하여 ATT 0x0e 오류를 회피 시도합니다.
+     */
     async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = 300) {
         if (!this.isConnected) {
             throw new Error("Device not connected.");
         }
 
+        // --- 수정된 부분: type: 'command' (Write Without Response) 명시 ---
+        const writeOptions = { type: 'command' };
+        // ----------------------------------------------------------------
+
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                await characteristic.writeValue(packet);
-                this.log.debug(`[BLE Write] 쓰기 성공 (시도: ${attempt}/${maxRetries}).`);
+                // writeValue(data, options) 형태로 사용
+                await characteristic.writeValue(packet, writeOptions);
+                this.log.debug(`[BLE Write] 쓰기 성공 (시도: ${attempt}/${maxRetries}, Type: Command).`);
 
                 await sleep(500);
 
                 return true;
             } catch (error) {
-                this.log.warn(`[BLE Write] 쓰기 오류 발생 (시도: ${attempt}/${maxRetries}): ${error.message}`);
+                this.log.warn(`[BLE Write] 쓰기 오류 발생 (시도: ${attempt}/${maxRetries}, Type: Command): ${error.message}`);
 
                 // 치명적인 ATT 오류 발생 시 즉시 연결 해제 및 루프 종료
                 if (error.message.includes('0x0e')) {
@@ -121,7 +130,10 @@ class HeatingMatAccessory {
         try {
             const initPacket = Buffer.from(this.initPacketHex, 'hex');
             this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
-            await this.setCharacteristic.writeValue(initPacket);
+
+            // --- 수정된 부분: 초기화 패킷도 Write Command로 전송 ---
+            await this.setCharacteristic.writeValue(initPacket, { type: 'command' });
+            // ------------------------------------------------------
 
             await sleep(500);
 
