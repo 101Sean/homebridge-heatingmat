@@ -93,8 +93,8 @@ class HeatingMatAccessory {
         const checkSum = (0xFF - dataByte) & 0xFF;
 
         const buffer = Buffer.alloc(4);
-        buffer.writeUInt8(dataByte, 0); // Left Data
-        buffer.writeUInt8(checkSum, 1); // Left Checksum
+        buffer.writeUInt8(0x00, 0); // Left Data
+        buffer.writeUInt8(0x00, 1); // Left Checksum
         buffer.writeUInt8(dataByte, 2);
         buffer.writeUInt8(checkSum, 3);
 
