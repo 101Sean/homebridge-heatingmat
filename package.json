@@ -16,8 +16,7 @@
     "mattress"
   ],
   "dependencies": {
-    "@abandonware/noble": "^2.0.1",
-    "node-ble": "^1.13.0",
+    "noble": "^1.9.1",
     "node.js": "^0.0.1-security"
   },
   "peerDependencies": {

@@ -1,4 +1,4 @@
-const noble = require('noble'); // <--- 오리지널 noble 사용 유지
+const noble = require('noble');
 const util = require('util');
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
