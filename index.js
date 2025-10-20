@@ -71,7 +71,7 @@ class HeatingMatAccessory {
         return buffer;
     }
 
-    // 초기화 패킷 전송
+    // 초기화 패킷 전송 (재활성화 및 지연 추가)
     async sendInitializationPacket() {
         if (!this.setCharacteristic || !this.isConnected) {
             this.log.warn('[Init] 초기화 특성이 없거나 연결되어 있지 않습니다. 초기화 건너뛰기.');
@@ -82,9 +82,14 @@ class HeatingMatAccessory {
             const initPacket = Buffer.from(this.initPacketHex, 'hex');
             this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
             await this.setCharacteristic.writeValue(initPacket);
+
+            // 장치가 패킷을 처리할 시간을 줍니다.
+            await sleep(500);
+
             this.log.info('[Init] 초기화 패킷 전송 성공.');
         } catch (error) {
             this.log.error(`[Init] 초기화 패킷 전송 오류: ${error.message}`);
+            // 초기화에 실패하면 제어 명령도 실패하므로 연결을 끊고 재시도합니다.
             this.disconnectDevice(true);
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
@@ -328,9 +333,11 @@ class HeatingMatAccessory {
                         await this.connectDevice();
                     } else {
                         if (deviceAddresses.length > 0) {
-                            this.log.info(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
+                            // 주변 장치가 있어도 타겟이 없을 경우 debug로 출력
+                            this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
                         } else {
-                            this.log.info(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
+                            // 주변 장치 자체가 없을 경우 debug로 출력
+                            this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
                         }
                     }
 
@@ -371,15 +378,15 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
-            this.log.info(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
-            this.log.info(`[BLE] 특성 탐색 시도: (초기화: ${this.charSetUuid}, 온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
+            this.log.debug(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
+            this.log.debug(`[BLE] 특성 탐색 시도: (초기화: ${this.charSetUuid}, 온도: ${this.charTempUuid}, 타이머: ${this.charTimeUuid})`);
 
             await sleep(500);
 
             const gatt = await this.device.gatt();
 
             const service = await gatt.getPrimaryService(this.serviceUuid);
-            this.log.info(`[BLE] 서비스 ${this.serviceUuid} 발견 성공.`);
+            this.log.debug(`[BLE] 서비스 ${this.serviceUuid} 발견 성공.`);
 
             // 초기화 특성
             if (this.charSetUuid) {
@@ -393,10 +400,9 @@ class HeatingMatAccessory {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
                 if (this.setCharacteristic) {
-                    // ** [수정] 초기화 패킷 전송이 즉시 연결 해제를 유발하는 것으로 확인되어 주석 처리함.
-                    // 장치가 초기화 패킷 없이도 통신을 허용하는지 확인합니다.
-                    this.log.warn('[Init Skip] 연결 해제 문제(a55affff 전송 직후)로 인해 초기화 패킷 전송을 건너뛰고 상태 동기화를 시도합니다.');
-                    // await this.sendInitializationPacket();
+                    // ** 초기화 패킷 전송을 재활성화합니다. **
+                    // 이 과정이 없으면 장치가 제어 명령을 거부하고 연결을 끊는 것으로 보입니다.
+                    await this.sendInitializationPacket();
                 }
 
                 await this.readCurrentState();
@@ -433,7 +439,7 @@ class HeatingMatAccessory {
                 ? this.Characteristic.TargetHeatingCoolingState.OFF
                 : this.Characteristic.TargetHeatingCoolingState.HEAT);
 
-            this.log.info(`[Sync] 온도 상태 동기화 완료: Level ${currentLevel} -> ${currentTemp}°C. (읽기 인덱스 3 사용)`);
+            this.log.debug(`[Sync] 온도 상태 동기화 완료: Level ${currentLevel} -> ${currentTemp}°C. (읽기 인덱스 3 사용)`);
 
             const timeValue = await this.timeCharacteristic.readValue();
             const currentHours = timeValue.readUInt8(3);
@@ -444,7 +450,7 @@ class HeatingMatAccessory {
             this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
             this.timerService.updateCharacteristic(this.Characteristic.Brightness, currentHours * BRIGHTNESS_PER_HOUR);
 
-            this.log.info(`[Sync] 타이머 상태 동기화 완료: ${currentHours} 시간. (읽기 인덱스 3 사용)`);
+            this.log.debug(`[Sync] 타이머 상태 동기화 완료: ${currentHours} 시간. (읽기 인덱스 3 사용)`);
 
         } catch (error) {
             this.log.warn(`[Sync] 초기 상태 읽기 실패 (READ 속성이 없거나 데이터 해석 오류): ${error.message}`);
