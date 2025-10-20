@@ -86,7 +86,6 @@ class HeatingMatAccessory {
             } catch (error) {
                 this.log.warn(`[BLE Write] 쓰기 오류 발생 (시도: ${attempt}/${maxRetries}): ${error.message}`);
 
-                // *** [FIX 1: ATT 0x0e 오류 처리] ***
                 // 치명적인 ATT 오류 발생 시 즉시 연결 해제 및 루프 종료
                 if (error.message.includes('0x0e')) {
                     this.log.error('[BLE Write] 치명적인 ATT 오류 발생 (0x0e). 즉시 연결 해제 후 루프 종료.');
@@ -107,10 +106,8 @@ class HeatingMatAccessory {
 
     /**
      * [확정된 패킷 구성 함수]
-     * 패킷 구조: [Value (Left), Checksum (Left), Value (Right), Checksum (Right)]
+     * 명령 패킷 구조: [Value (Left, Index 0), Checksum (Left, Index 1), Value (Right, Index 2), Checksum (Right, Index 3)]
      * Checksum 공식: 255 - Value
-     *
-     * HomeKit은 단일 제어를 위해 좌우 Value를 동일하게 설정합니다.
      */
     createControlPacket(value) {
         const dataByte = value;
@@ -119,7 +116,7 @@ class HeatingMatAccessory {
 
         const buffer = Buffer.alloc(4);
 
-        // Byte 0: Left Zone Value (Level or Hours)
+        // Byte 0: Left Zone Value (Level or Hours) - 명령 패킷은 0, 2 인덱스에 값
         buffer.writeUInt8(dataByte, 0);
         // Byte 1: Left Zone Checksum (255 - Value)
         buffer.writeUInt8(checkSum, 1);
@@ -230,7 +227,7 @@ class HeatingMatAccessory {
 
         // 2. 중복 Level 명령 방지
         if (level === this.lastSentLevel && this.currentState.targetTemp === value) {
-            this.log.info(`[Temp Debounce] Level ${level}은 이미 전송된 값입니다. 명령 전송을 건너뜀니다.`);
+            this.log.info(`[Temp Debounce] Level ${level}은 이미 전송된 값입니다. 명령 전송을 건너뜜니다.`);
             return;
         }
 
@@ -241,7 +238,6 @@ class HeatingMatAccessory {
 
         // 4. 350ms 지연 후 실제 명령 전송 (앱 분석 결과 반영)
         this.setTempTimeout = setTimeout(async () => {
-            // *** [FIX 2: Uncaught Rejection Crash 방지] ***
             try {
                 await this.sendTemperatureCommand(value, level);
             } catch (e) {
@@ -286,13 +282,11 @@ class HeatingMatAccessory {
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
-            // *** [HAP Status Error: -70402] 발생 방지 로직 FIX] ***
             if (level === 0) {
                 this.log.warn('[Temp Command] [Startup Skip] BLE 연결이 없어 Level 0 (OFF) 명령 전송을 건너뜁니다.');
-                return; // 시작 시의 OFF 명령은 무시하고 에러를 던지지 않습니다.
+                return;
             } else {
                 this.log.warn('[Temp Command] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
-                // 사용자가 HEAT 명령을 내렸을 경우에만 에러를 던져 HomeKit에 통신 실패를 알립니다.
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         }
@@ -378,13 +372,11 @@ class HeatingMatAccessory {
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         } else {
-            // *** [HAP Status Error: -70402] 발생 방지 로직 FIX] ***
             if (hours === 0) {
                 this.log.warn('[Timer] [Startup Skip] BLE 연결이 없어 타이머 0시간 (OFF) 명령 전송을 건너킵니다.');
-                return; // 시작 시의 OFF 명령은 무시하고 에러를 던지지 않습니다.
+                return;
             } else {
                 this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
-                // 사용자가 ON 명령을 내렸을 경우에만 에러를 던져 HomeKit에 통신 실패를 알립니다.
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
         }
@@ -525,13 +517,6 @@ class HeatingMatAccessory {
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
-                // [주의] ATT 0x0e 오류 회피를 위해 초기화 패킷 전송은 주석 처리된 상태로 유지합니다.
-                // if (this.setCharacteristic && this.initPacketHex) {
-                //     this.log.warn('[Init] ATT 0x0e 오류 회피를 위해 초기화 패킷 전송을 건너뜠습니다.');
-                //     // await this.sendInitializationPacket();
-                //     // await sleep(1000);
-                // }
-
                 // BLE Notification/Indication 활성화 및 핸들러 구현
                 try {
                     this.log.info('[BLE] 온도 및 타이머 특성 Notification 활성화 시도...');
@@ -541,10 +526,10 @@ class HeatingMatAccessory {
                     this.tempCharacteristic.on('valuechanged', (data) => {
                         this.log.debug(`[BLE Notify] 온도 데이터 수신: ${data.toString('hex')}`);
 
-                        // *** [FIX 3: 수동 조작 동기화를 위한 인덱스 수정] ***
-                        // 패킷 구조가 [Level, Checksum, Level, Checksum]이라고 가정하고 인덱스 0과 2에서 레벨을 읽습니다.
-                        const levelLeft = data.readUInt8(0); // 좌측 레벨 (수정됨)
-                        const levelRight = data.readUInt8(2); // 우측 레벨 (수정됨)
+                        // *** [FIX: 인덱스 1과 3으로 수정] ***
+                        // 알림 패킷 구조가 [Checksum, Level, Checksum, Level]로 추정
+                        const levelLeft = data.readUInt8(1); // 좌측 레벨 (수정됨)
+                        const levelRight = data.readUInt8(3); // 우측 레벨 (수정됨)
 
                         const currentLevel = Math.max(levelLeft, levelRight);
                         const newTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
@@ -596,9 +581,9 @@ class HeatingMatAccessory {
                     this.timeCharacteristic.on('valuechanged', (data) => {
                         this.log.debug(`[BLE Notify] 타이머 데이터 수신: ${data.toString('hex')}`);
 
-                        // 좌/우 중 최대 시간을 현재 상태로 반영 (시간은 명령/알림 패킷 구조가 동일할 가능성이 높음)
-                        const currentHoursLeft = data.readUInt8(0);
-                        const currentHoursRight = data.readUInt8(2);
+                        // *** [FIX: 인덱스 1과 3으로 수정] ***
+                        const currentHoursLeft = data.readUInt8(1);
+                        const currentHoursRight = data.readUInt8(3);
                         const currentHours = Math.max(currentHoursLeft, currentHoursRight);
 
                         if (this.currentState.timerHours !== currentHours) {
@@ -635,9 +620,9 @@ class HeatingMatAccessory {
         try {
             // 온도 상태 동기화: 좌우 중 최대 레벨 반영
             const tempValue = await this.tempCharacteristic.readValue();
-            // 초기 READ 시에도 인덱스 0과 2를 사용하여 레벨을 읽도록 수정
-            const levelLeft = tempValue.readUInt8(0);
-            const levelRight = tempValue.readUInt8(2);
+            // *** [FIX: 인덱스 1과 3으로 수정] ***
+            const levelLeft = tempValue.readUInt8(1);
+            const levelRight = tempValue.readUInt8(3);
             const currentLevel = Math.max(levelLeft, levelRight);
 
             const currentTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
@@ -665,9 +650,9 @@ class HeatingMatAccessory {
 
             // 타이머 상태 동기화: 좌우 중 최대 시간 반영
             const timeValue = await this.timeCharacteristic.readValue();
-            // 초기 READ 시에도 인덱스 0과 2를 사용하여 시간을 읽도록 수정
-            const currentHoursLeft = timeValue.readUInt8(0);
-            const currentHoursRight = timeValue.readUInt8(2);
+            // *** [FIX: 인덱스 1과 3으로 수정] ***
+            const currentHoursLeft = timeValue.readUInt8(1);
+            const currentHoursRight = timeValue.readUInt8(3);
             const currentHours = Math.max(currentHoursLeft, currentHoursRight);
 
 
