@@ -1,17 +1,13 @@
 const NodeBle = require('node-ble');
 const util = require('util');
 
-// 온도 (섭씨) -> 레벨 (0-7) 매핑
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
-// 레벨 (0-7) -> 온도 (섭씨) 매핑
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
 const MIN_TEMP = 15;
 const MAX_TEMP = 50;
 const DEFAULT_HEAT_TEMP = 30;
 
-// 타이머 최대 시간 (최대 15시간)
 const MAX_TIMER_HOURS = 15;
-// HomeKit Brightness 단위당 시간 값 (100 / 15)
 const BRIGHTNESS_PER_HOUR = 100 / MAX_TIMER_HOURS;
 
 const sleep = util.promisify(setTimeout);
@@ -49,9 +45,7 @@ class HeatingMatAccessory {
 
         this.isScanningLoopActive = false;
 
-        // 디바운스 타이머 저장을 위한 변수 (BLE 과부하 방지)
         this.setTempTimeout = null;
-        // 마지막으로 설정된 Level 값을 저장하여 중복 명령 방지
         this.lastSentLevel = -1;
 
         this.currentState = {
@@ -67,9 +61,6 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
-    /**
-     * BLE 쓰기 작업 시 재시도 로직을 적용하여 안정성을 높입니다.
-     */
     async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = 300) {
         if (!this.isConnected) {
             throw new Error("Device not connected.");
@@ -104,26 +95,18 @@ class HeatingMatAccessory {
         }
     }
 
-    /**
-     * [확정된 패킷 구성 함수]
-     * 명령 패킷 구조: [Value (Left, Index 0), Checksum (Left, Index 1), Value (Right, Index 2), Checksum (Right, Index 3)]
-     * Checksum 공식: 255 - Value
-     */
     createControlPacket(value) {
         const dataByte = value;
-        // Checksum: (0xFF - Value) & 0xFF
         const checkSum = (0xFF - dataByte) & 0xFF;
 
         const buffer = Buffer.alloc(4);
 
-        // Byte 0: Left Zone Value (Level or Hours) - 명령 패킷은 0, 2 인덱스에 값
+        // Left Zone
         buffer.writeUInt8(dataByte, 0);
-        // Byte 1: Left Zone Checksum (255 - Value)
         buffer.writeUInt8(checkSum, 1);
 
-        // Byte 2: Right Zone Value (Level or Hours)
+        // Right Zone
         buffer.writeUInt8(dataByte, 2);
-        // Byte 3: Right Zone Checksum (255 - Value)
         buffer.writeUInt8(checkSum, 3);
 
         return buffer;
@@ -204,19 +187,14 @@ class HeatingMatAccessory {
     async handleSetTargetHeatingCoolingState(value) {
         if (value === this.Characteristic.TargetHeatingCoolingState.OFF) {
             this.log.info('[HomeKit] 전원 OFF 명령 수신. Level 0 (15°C)로 설정합니다.');
-            // handleSetTargetTemperature는 디바운스를 위해 Promise를 반환하지 않으므로 await 제거
             this.handleSetTargetTemperature(MIN_TEMP);
 
         } else if (value === this.Characteristic.TargetHeatingCoolingState.HEAT) {
             this.log.info(`[HomeKit] 전원 ON 명령 수신. 마지막 설정 온도(${this.currentState.lastHeatTemp}°C)로 복구합니다.`);
-            // handleSetTargetTemperature는 디바운스를 위해 Promise를 반환하지 않으므로 await 제거
             this.handleSetTargetTemperature(this.currentState.lastHeatTemp);
         }
     }
 
-    /**
-     * HomeKit 온도 설정 명령을 처리하며, BLE 명령 과부하를 방지하기 위해 디바운스 로직을 적용합니다.
-     */
     handleSetTargetTemperature(value) {
         // 1. 목표 Level 계산
         let level = TEMP_LEVEL_MAP[Math.round(value / 5) * 5] || 0;
@@ -227,7 +205,7 @@ class HeatingMatAccessory {
 
         // 2. 중복 Level 명령 방지
         if (level === this.lastSentLevel && this.currentState.targetTemp === value) {
-            this.log.info(`[Temp Debounce] Level ${level}은 이미 전송된 값입니다. 명령 전송을 건너뜜니다.`);
+            this.log.info(`[Temp Debounce] Level ${level}은 이미 전송된 값입니다. 명령 전송을 건너뜁니다.`);
             return;
         }
 
@@ -246,9 +224,6 @@ class HeatingMatAccessory {
         }, 350);
     }
 
-    /**
-     * 실제 BLE 온도를 전송하고 HomeKit 상태를 업데이트하는 내부 함수
-     */
     async sendTemperatureCommand(value, level) {
         this.setTempTimeout = null; // 타이머 완료
 
@@ -297,7 +272,6 @@ class HeatingMatAccessory {
         // 1. 밝기 값으로 시간 계산
         let hours = Math.round(value / BRIGHTNESS_PER_HOUR);
 
-        // 0% < 밝기 <= (100/15)% 일 경우 1시간으로 설정
         if (value > 0 && hours === 0) {
             hours = 1;
         }
@@ -306,7 +280,7 @@ class HeatingMatAccessory {
             hours = MAX_TIMER_HOURS;
         }
 
-        // 2. 0시간일 시 전원 OFF 명령을 추가합니다. (온도 15°C 설정)
+        // 2. 0시간일 시 전원 OFF 명령을 추가
         if (hours === 0) {
             this.log.info('[Timer] 타이머 0시간 설정 수신. 전원을 OFF 합니다.');
             // 디바운스 로직이 적용된 handleSetTargetTemperature 호출
@@ -335,7 +309,6 @@ class HeatingMatAccessory {
             hoursToSend = 0;
             brightnessToSet = 0;
             this.log.info('[Timer] HomeKit 스위치 OFF. 타이머 해제 (0시간).');
-            // 타이머 스위치 OFF 시 전원 OFF 명령을 추가합니다.
             this.handleSetTargetTemperature(MIN_TEMP);
 
         } else {
@@ -382,9 +355,6 @@ class HeatingMatAccessory {
         }
     }
 
-    /**
-     * BLE 어댑터 및 장치 검색/연결 로직 (기존 작동 로직 유지)
-     */
     initNodeBle() {
         this.initializeBleAdapter();
     }
@@ -521,6 +491,18 @@ class HeatingMatAccessory {
                 try {
                     this.log.info('[BLE] 온도 및 타이머 특성 Notification 활성화 시도...');
 
+                    // setCharacteristic (상태 응답용) Notification 활성화
+                    if (this.setCharacteristic) {
+                        await this.setCharacteristic.startNotifications();
+                        this.setCharacteristic.on('valuechanged', (data) => {
+                            this.log.debug(`[BLE Notify] SET 특성 데이터 수신: ${data.toString('hex')}`);
+                            // HomeActivity에서 'a55aFFFF' 응답이 이 특성으로 올 가능성을 대비합니다.
+                            // 전체 상태를 다시 읽어 HomeKit과 매트 상태를 완전히 동기화합니다.
+                            this.readCurrentState();
+                            this.log.info('[Notify] SET 특성에서 상태 알림 수신. 전체 상태를 재동기화합니다.');
+                        });
+                    }
+
                     // 온도 핸들러
                     await this.tempCharacteristic.startNotifications();
                     this.tempCharacteristic.on('valuechanged', (data) => {
@@ -537,9 +519,7 @@ class HeatingMatAccessory {
                         // Notification 수신 시 lastSentLevel도 업데이트하여 상태 동기화
                         this.lastSentLevel = currentLevel;
 
-                        // --- 수동 조작 시 Target/Current 상태 동기화 로직 ---
-
-                        // 1. Target Temperature 업데이트 (수동 조작된 온도가 새로운 목표 온도가 됩니다)
+                        // 1. Target Temperature 업데이트
                         if (this.currentState.targetTemp !== newTemp) {
                             this.currentState.targetTemp = newTemp;
                             this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, newTemp);
@@ -573,15 +553,13 @@ class HeatingMatAccessory {
                         if (currentLevel > 0) {
                             this.currentState.lastHeatTemp = newTemp;
                         }
-                        // --- 수동 조작 시 Target/Current 상태 동기화 로직 끝 ---
                     });
 
-                    // 타이머 핸들러
+                    // 타이머 핸들러 (기존 로직 유지 - 주 동기화 채널)
                     await this.timeCharacteristic.startNotifications();
                     this.timeCharacteristic.on('valuechanged', (data) => {
                         this.log.debug(`[BLE Notify] 타이머 데이터 수신: ${data.toString('hex')}`);
 
-                        // *** [FIX: 인덱스 1과 3으로 수정] ***
                         const currentHoursLeft = data.readUInt8(1);
                         const currentHoursRight = data.readUInt8(3);
                         const currentHours = Math.max(currentHoursLeft, currentHoursRight);
@@ -618,16 +596,14 @@ class HeatingMatAccessory {
 
     async readCurrentState() {
         try {
-            // 온도 상태 동기화: 좌우 중 최대 레벨 반영
             const tempValue = await this.tempCharacteristic.readValue();
-            // *** [FIX: 인덱스 1과 3으로 수정] ***
+
             const levelLeft = tempValue.readUInt8(1);
             const levelRight = tempValue.readUInt8(3);
             const currentLevel = Math.max(levelLeft, levelRight);
 
             const currentTemp = LEVEL_TEMP_MAP[currentLevel] || MIN_TEMP;
 
-            // 초기 상태 동기화 시 lastSentLevel도 업데이트
             this.lastSentLevel = currentLevel;
 
             this.currentState.targetTemp = currentTemp;
@@ -648,9 +624,8 @@ class HeatingMatAccessory {
 
             this.log.debug(`[Sync] 온도 상태 동기화 완료: Level ${currentLevel} -> ${currentTemp}°C. (좌우 중 최대 레벨 반영)`);
 
-            // 타이머 상태 동기화: 좌우 중 최대 시간 반영
             const timeValue = await this.timeCharacteristic.readValue();
-            // *** [FIX: 인덱스 1과 3으로 수정] ***
+
             const currentHoursLeft = timeValue.readUInt8(1);
             const currentHoursRight = timeValue.readUInt8(3);
             const currentHours = Math.max(currentHoursLeft, currentHoursRight);
