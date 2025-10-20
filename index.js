@@ -53,17 +53,18 @@ class HeatingMatAccessory {
     }
 
     // ---------------------------------------------------------
-    // BLE 초기화 및 스캔 로직 (크래시 방지)
+    // BLE 초기화 및 스캔 로직 (크래시 방지 - 핵심 수정 부분)
     // ---------------------------------------------------------
 
     initNodeBle() {
         this.log.info(`[BLE] 어댑터(${this.adapterId}) 초기화 시도...`);
-        const { createBluetooth } = NodeBle;
 
         try {
-            const { bluetooth, destroy } = createBluetooth(this.adapterId);
+            // ✅ 수정: NodeBle 객체를 통해 createBluetooth 함수를 직접 호출하여 변수 충돌을 방지합니다.
+            const { bluetooth, destroy } = NodeBle.createBluetooth(this.adapterId);
             this.destroyBluetooth = destroy;
 
+            // 'bluetooth'는 Promise입니다.
             bluetooth.then(bt => {
                 this.initializeBleAdapter(bt);
                 this.startScanningLoop();
@@ -96,6 +97,13 @@ class HeatingMatAccessory {
             try {
                 if (!this.isConnected) {
                     this.log.info('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
+                    // adapter가 null이 아닌지 확인
+                    if (!this.adapter) {
+                        this.log.error('[BLE] 어댑터 객체가 없습니다. 초기화가 실패했을 수 있습니다. 5초 후 재시도합니다.');
+                        await sleep(5000);
+                        continue;
+                    }
+
                     await this.adapter.startDiscovery();
 
                     const device = await this.adapter.waitDevice(this.macAddress, SCAN_TIMEOUT_MS);
@@ -246,6 +254,26 @@ class HeatingMatAccessory {
     // 제어 및 상태 관리 로직
     // ---------------------------------------------------------
 
+    async sendInitializationPacket() {
+        if (!this.setCharacteristic || !this.isConnected || !this.initPacketHex) {
+            this.log.warn('[Init] 초기화 조건 불충족. 건너뛰기.');
+            return;
+        }
+
+        try {
+            const initPacket = Buffer.from(this.initPacketHex, 'hex');
+            this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
+            await this.safeWriteValue(this.setCharacteristic, initPacket, 3, 500);
+
+            this.log.info('[Init] 초기화 패킷 전송 성공.');
+        } catch (error) {
+            this.log.error(`[Init] 초기화 패킷 전송 오류: ${error.message}`);
+            this.disconnectDevice(true);
+            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+        }
+    }
+
+
     // 최종 쓰기 패킷: [Level, Checksum, Level, Checksum] (4바이트)
     createControlPacket(value) {
         const dataByte = value; // Level
@@ -262,7 +290,8 @@ class HeatingMatAccessory {
 
     async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = 300) {
         if (!this.isConnected) {
-            throw new Error("Device not connected.");
+            // BLE 연결이 끊어져 있으면, 이 함수를 호출한 곳에서 HAPStatusError를 throw 하도록 합니다.
+            throw new Error("Device not connected. Cannot write value.");
         }
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -366,6 +395,7 @@ class HeatingMatAccessory {
             }
         } else {
             this.log.warn('[Temp] BLE 연결 없음. 명령 전송 불가. (재연결 시도 중)');
+            // BLE 연결 실패 시 HomeKit에 통신 실패를 알립니다.
             throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
         }
     }
