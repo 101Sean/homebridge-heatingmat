@@ -357,8 +357,9 @@ class HeatingMatAccessory {
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
 
-            this.log.debug('[BLE] 연결 성공 후 안정화를 위해 1000ms 대기...');
-            await sleep(1000);
+            // **[수정 지점 1] 안정화를 위해 1000ms -> 2000ms 대기 시간을 늘립니다.**
+            this.log.debug('[BLE] 연결 성공 후 안정화를 위해 2000ms 대기...');
+            await sleep(2000);
 
             await this.discoverCharacteristics();
 
@@ -392,6 +393,19 @@ class HeatingMatAccessory {
 
                 await this.setupNotifications();
                 await this.readCurrentState();
+
+                // **[수정 지점 2] 초기 상태 읽기 후, 전원이 꺼져 있으면 강제로 타이머를 1시간 설정하여 연결 끊김 방지.**
+                if (this.currentState.currentHeatingCoolingState === this.Characteristic.CurrentHeatingCoolingState.OFF) {
+                    this.log.warn(`[Init] 장치 전원이 OFF 상태로 감지됨. 연결 유지 및 테스트를 위해 타이머를 1시간으로 강제 설정합니다.`);
+                    await this.sendTimerCommand(1); // 1시간 설정
+
+                    // HomeKit 상태 업데이트 (타이머 1시간 반영)
+                    this.currentState.timerHours = 1;
+                    this.currentState.timerOn = true;
+                    this.timerService.updateCharacteristic(this.Characteristic.On, true);
+                    this.timerService.updateCharacteristic(this.Characteristic.Brightness, 1 * BRIGHTNESS_PER_HOUR);
+                }
+
 
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도:${this.charTempUuid} - ${!!this.tempCharacteristic}, 타이머:${this.charTimeUuid} - ${!!this.timeCharacteristic}) 연결 해제.`);
