@@ -1,3 +1,4 @@
+// TODO: 디바이스 수동 조작 시, 악세서리 동기화
 const NodeBle = require('node-ble');
 const util = require('util');
 
@@ -30,12 +31,8 @@ class HeatingMatAccessory {
         this.charSetUuid = (config.char_set_uuid || '').toLowerCase();
         this.initPacketHex = config.init_packet_hex;
 
-        // --- NEW: 쓰기 타입 설정 (기본값 'request'로 변경하여 장치가 응답하도록 함) ---
-        // 'request': Write With Response (장치가 명령을 인식할 확률 높음, ATT 0x0e 오류 가능성 있음)
-        // 'command': Write Without Response (ATT 0x0e 오류 방지, 장치가 명령을 무시할 수 있음)
         this.writeType = (config.write_type || 'request').toLowerCase();
         this.log.info(`[BLE] Write Type 설정: ${this.writeType}. (request = 응답 대기, command = 응답 없음)`);
-        // --------------------------------------------------------------------------
 
         if (!this.macAddress || !this.serviceUuid || !this.charTempUuid || !this.charTimeUuid) {
             this.log.error('config.json에 필수 설정(mac_address, service_uuid, char_temp_uuid, char_timer_uuid)이 누락되었습니다.');
@@ -55,10 +52,9 @@ class HeatingMatAccessory {
         this.setTempTimeout = null;
         this.lastSentLevel = -1;
 
-        // 초기 상태를 MIN_TEMP로 설정하여 장치 상태를 HomeKit이 관리하도록 함
         this.currentState = {
-            targetTemp: DEFAULT_HEAT_TEMP, // 시작 시 목표 온도는 마지막 사용 온도로 설정 (HomeKit이 제어 시작 시 켜지도록)
-            currentTemp: MIN_TEMP, // 실제 측정 온도는 최소값으로 시작
+            targetTemp: DEFAULT_HEAT_TEMP,
+            currentTemp: MIN_TEMP,
             currentHeatingCoolingState: this.Characteristic.CurrentHeatingCoolingState.OFF,
             timerHours: 0,
             timerOn: false,
@@ -69,16 +65,11 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
-    /**
-     * BLE 특성에 값을 쓰는 안전한 함수.
-     * this.writeType 설정을 사용 ('request' 또는 'command').
-     */
     async safeWriteValue(characteristic, packet, maxRetries = 3) {
         if (!this.isConnected) {
             throw new Error("Device not connected.");
         }
 
-        // --- UPDATED: 설정된 writeType 사용 ('request'가 기본) ---
         const writeOptions = { type: this.writeType };
         const writeTypeLog = this.writeType === 'request' ? 'Request (응답 대기)' : 'Command (응답 없음)';
         const delayMs = 300; // Android App 코드 분석 결과 300ms 지연 사용
@@ -236,7 +227,7 @@ class HeatingMatAccessory {
             clearTimeout(this.setTempTimeout);
         }
 
-        // 4. 350ms 지연 후 실제 명령 전송 (앱 분석 결과 반영)
+        // 4. 350ms 지연 후 실제 명령 전송
         this.setTempTimeout = setTimeout(async () => {
             try {
                 await this.sendTemperatureCommand(value, level);
@@ -365,9 +356,7 @@ class HeatingMatAccessory {
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
-                // safeWriteValue가 이제 this.writeType을 사용합니다.
                 await this.safeWriteValue(this.timeCharacteristic, packet);
-                // 성공 시 HomeKit 상태 업데이트는 handleSetTimerHours/handleTimerSwitch에서 이미 수행됨
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
@@ -419,7 +408,7 @@ class HeatingMatAccessory {
 
         while (this.isScanningLoopActive) {
             if (!this.isConnected) {
-                this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
+                //this.log.debug('[BLE] 장치 연결 상태가 아님. 스캔 시작...');
                 try {
                     await this.adapter.startDiscovery();
 
@@ -449,9 +438,9 @@ class HeatingMatAccessory {
                         await this.connectDevice();
                     } else {
                         if (deviceAddresses.length > 0) {
-                            this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
+                            //this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 발견된 모든 장치 주소: ${deviceAddresses.join(', ')}`);
                         } else {
-                            this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
+                            //this.log.debug(`[BLE] 매트 장치(${targetAddress})를 찾지 못했습니다. 주변 장치도 발견되지 않았습니다.`);
                         }
                     }
 
@@ -459,7 +448,7 @@ class HeatingMatAccessory {
                     this.log.error(`[BLE] 스캔 오류: ${error.message}`);
                 }
             } else {
-                this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
+                //this.log.debug('[BLE] 연결 상태 유지 중. 다음 스캔 주기까지 대기합니다.');
             }
 
             await sleep(this.scanInterval);
@@ -479,7 +468,7 @@ class HeatingMatAccessory {
 
             // 연결 해제 이벤트 리스너 추가
             this.device.on('disconnect', () => {
-                this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
+                //this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
                 this.disconnectDevice();
             });
 
@@ -520,9 +509,6 @@ class HeatingMatAccessory {
                     await this.sendInitializationPacket();
                 }
 
-                // 로그 분석 결과, Characteristic Read 및 Notification이 불안정하거나 지원되지 않아 제거합니다.
-                // HomeKit 상태는 Homebridge가 마지막으로 보낸 명령을 따라갑니다.
-
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
                 this.disconnectDevice(true);
@@ -534,12 +520,8 @@ class HeatingMatAccessory {
         }
     }
 
-    /**
-     * 로그 분석 결과, Characteristic Read 및 Notification이 불안정하거나 지원되지 않아 제거되었습니다.
-     * HomeKit은 마지막 전송 상태에 의존합니다.
-     */
     async readCurrentState() {
-        this.log.debug('[Sync] readCurrentState 함수는 불안정성으로 인해 비활성화되었습니다. HomeKit은 마지막 전송 상태에 의존합니다.');
+        //this.log.debug('[Sync] readCurrentState 함수는 불안정성으로 인해 비활성화되었습니다.');
     }
 
     disconnectDevice(resetDevice = false) {
