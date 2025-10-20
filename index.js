@@ -110,17 +110,22 @@ class HeatingMatAccessory {
         }
     }
 
+    /**
+     * 싱글 모드 장치를 위해 좌/우 영역에 동일한 제어 값을 포함하는 패킷을 생성합니다.
+     * @param {number} value 제어 레벨 (0-7 또는 타이머 시간)
+     * @returns {Buffer} 4바이트 제어 패킷
+     */
     createControlPacket(value) {
         const dataByte = value;
         const checkSum = (0xFF - dataByte) & 0xFF;
 
         const buffer = Buffer.alloc(4);
 
-        // Left Zone
+        // [싱글 모드 통합] 좌측 영역 (Left Zone)
         buffer.writeUInt8(dataByte, 0);
         buffer.writeUInt8(checkSum, 1);
 
-        // Right Zone
+        // [싱글 모드 통합] 우측 영역 (Right Zone) - 좌측과 동일한 값 복사
         buffer.writeUInt8(dataByte, 2);
         buffer.writeUInt8(checkSum, 3);
 
@@ -151,25 +156,23 @@ class HeatingMatAccessory {
 
     // --- 수동 조작 감지를 위한 데이터 파싱 및 HomeKit 업데이트 ---
 
+    /**
+     * 온도/전원 관련 Notification 데이터를 파싱하고 HomeKit 상태를 업데이트합니다.
+     * 싱글 모드 장치는 보통 인덱스 0 또는 1에 실제 값을 포함합니다.
+     */
     parseAndUpdateTemperature(data) {
         // [수동 조작 감지 1]: 온도 데이터 파싱 및 HomeKit 업데이트
-        if (!data || data.length < 3) {
+        if (!data || data.length < 1) { // 최소 1바이트 이상이어야 함
             this.log.warn(`[Notify] 온도 데이터가 너무 짧습니다: ${data ? data.toString('hex') : 'null'}`);
             return;
         }
 
-        // --- 수정된 부분: 0번 인덱스 대신 2번 인덱스(또는 0xFF가 아닌 값)를 사용해봅니다. ---
-        let level = data.readUInt8(2); // 인덱스 2의 값을 시도
+        // [수정] 싱글 모드 장치에서는 주로 첫 번째 바이트(인덱스 0)에 상태 값이 옵니다.
+        // 듀얼 모드 기기의 Left Zone에 해당하는 값으로 간주하고 사용합니다.
+        let level = data.readUInt8(0);
 
-        // 데이터가 4바이트이고 0번 인덱스가 0xFF인 경우, 2번 인덱스의 값을 사용하도록 변경했습니다.
-        if (data.length === 4 && data.readUInt8(0) === 0xFF && data.readUInt8(2) !== 0xFF) {
-            level = data.readUInt8(2);
-            this.log.debug(`[Notify] 4바이트 패킷 감지 (${data.toString('hex')}). Level을 인덱스 2에서 읽습니다: ${level}`);
-        } else {
-            level = data.readUInt8(0);
-            this.log.debug(`[Notify] 일반 패킷 감지 (${data.toString('hex')}). Level을 인덱스 0에서 읽습니다: ${level}`);
-        }
-        // -------------------------------------------------------------------------------------
+        this.log.debug(`[Notify] 패킷 감지 (${data.toString('hex')}). Level을 인덱스 0에서 읽습니다: ${level}`);
+
 
         const newTemp = LEVEL_TEMP_MAP[level] || MIN_TEMP;
 
@@ -198,25 +201,21 @@ class HeatingMatAccessory {
         this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, newTargetState);
     }
 
+    /**
+     * 타이머 관련 Notification 데이터를 파싱하고 HomeKit 상태를 업데이트합니다.
+     */
     parseAndUpdateTimer(data) {
         // [수동 조작 감지 2]: 타이머 데이터 파싱 및 HomeKit 업데이트
-        if (!data || data.length < 3) {
+        if (!data || data.length < 1) { // 최소 1바이트 이상이어야 함
             this.log.warn(`[Notify] 타이머 데이터가 너무 짧습니다: ${data ? data.toString('hex') : 'null'}`);
             return;
         }
 
-        // --- 수정된 부분: 0번 인덱스 대신 2번 인덱스(또는 0xFF가 아닌 값)를 사용해봅니다. ---
-        let hours = data.readUInt8(2); // 인덱스 2의 값을 시도
+        // [수정] 싱글 모드 장치에서는 주로 첫 번째 바이트(인덱스 0)에 타이머 시간이 옵니다.
+        // 듀얼 모드 기기의 Left Zone에 해당하는 값으로 간주하고 사용합니다.
+        let hours = data.readUInt8(0);
+        this.log.debug(`[Notify] 패킷 감지 (${data.toString('hex')}). Hours를 인덱스 0에서 읽습니다: ${hours}`);
 
-        // 데이터가 4바이트이고 0번 인덱스가 0xFF인 경우, 2번 인덱스의 값을 사용하도록 변경했습니다.
-        if (data.length === 4 && data.readUInt8(0) === 0xFF && data.readUInt8(2) !== 0xFF) {
-            hours = data.readUInt8(2);
-            this.log.debug(`[Notify] 4바이트 패킷 감지 (${data.toString('hex')}). Hours를 인덱스 2에서 읽습니다: ${hours}`);
-        } else {
-            hours = data.readUInt8(0);
-            this.log.debug(`[Notify] 일반 패킷 감지 (${data.toString('hex')}). Hours를 인덱스 0에서 읽습니다: ${hours}`);
-        }
-        // -------------------------------------------------------------------------------------
 
         if (hours > MAX_TIMER_HOURS) {
             hours = 0; // 255시간과 같은 비정상적인 값은 0시간(OFF)으로 처리
@@ -237,8 +236,6 @@ class HeatingMatAccessory {
     }
 
     // --- END of Data Parsing ---
-
-    // ... 나머지 코드는 동일하게 유지
 
     initServices() {
         this.accessoryInformation = new this.Service.AccessoryInformation()
