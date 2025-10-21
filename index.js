@@ -285,10 +285,6 @@ class HeatingMatAccessory {
         } else {
             if (level === 0) {
                 this.log.warn('[Temp Command] [Startup Skip] BLE 연결이 없어 Level 0 (OFF) 명령 전송을 건너뜁니다.');
-                // 비연결 상태에서도 상태는 업데이트하여 HomeKit UI가 'OFF'를 보여주도록 함
-                this.currentState.targetTemp = value;
-                this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
-                this.currentState.currentHeatingCoolingState = this.Characteristic.CurrentHeatingCoolingState.OFF;
                 return;
             } else {
                 this.log.warn('[Temp Command] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
@@ -379,9 +375,6 @@ class HeatingMatAccessory {
         } else {
             if (hours === 0) {
                 this.log.warn('[Timer] [Startup Skip] BLE 연결이 없어 타이머 0시간 (OFF) 명령 전송을 건너킵니다.');
-                // 비연결 상태에서도 상태는 업데이트하여 HomeKit UI가 'OFF'를 보여주도록 함
-                this.currentState.timerHours = hours;
-                this.currentState.timerOn = false;
                 return;
             } else {
                 this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
@@ -526,21 +519,6 @@ class HeatingMatAccessory {
                 if (this.setCharacteristic) {
                     await this.sendInitializationPacket();
                 }
-
-                // --- [NEW: Sync] HomeKit의 마지막 설정 상태를 장치에 동기화 시도 ---
-                this.log.info(`[Sync] HomeKit의 마지막 설정 상태를 장치에 동기화 시도 (온도: ${this.currentState.targetTemp}°C, 타이머: ${this.currentState.timerHours}시간).`);
-
-                // 1. 온도 명령 전송을 위한 Level 계산 (sendTemperatureCommand는 HomeKit 상태를 업데이트함)
-                let targetLevel = TEMP_LEVEL_MAP[Math.round(this.currentState.targetTemp / 5) * 5] || 0;
-                if (this.currentState.targetTemp <= MIN_TEMP) {
-                    targetLevel = 0;
-                }
-
-                await this.sendTemperatureCommand(this.currentState.targetTemp, targetLevel);
-
-                // 2. 타이머 명령 전송
-                await this.sendTimerCommand(this.currentState.timerHours);
-                // -------------------------------------------------------------
 
                 // 로그 분석 결과, Characteristic Read 및 Notification이 불안정하거나 지원되지 않아 제거합니다.
                 // HomeKit 상태는 Homebridge가 마지막으로 보낸 명령을 따라갑니다.
