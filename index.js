@@ -502,20 +502,11 @@ class HeatingMatAccessory {
 
         try {
             this.log.info(`[BLE] 매트 연결 시도...`);
+            await sleep(500);
+
             await this.device.connect();
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
-
-            // 연결 해제 이벤트 리스너 추가
-            this.device.on('disconnect', () => {
-                this.log.warn(`[BLE] 매트 연결 해제됨. 재연결 루프를 시작합니다.`);
-                this.disconnectDevice();
-            });
-
-            // 연결 직후 초기화 패킷 전송 시도
-            if (this.charSetUuid) {
-                await this.sendInitializationPacket();
-            }
 
             await this.discoverCharacteristics();
 
@@ -548,6 +539,10 @@ class HeatingMatAccessory {
 
             if (this.tempCharacteristic && this.timeCharacteristic) {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
+
+                if (this.charSetUuid && this.initPacketHex) {
+                    await this.sendInitializationPacket();
+                }
 
                 // 1. 온도 특성 Notification 구독 시도
                 this.log.info(`[BLE] 온도 특성(${this.charTempUuid}) Notification 구독을 시도합니다.`);
