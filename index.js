@@ -468,6 +468,9 @@ class HeatingMatAccessory {
                     await sleep(5000);
                     await this.adapter.stopDiscovery();
 
+                    this.log.debug('[BLE] 스캔 중지 후 어댑터 상태 안정화를 위해 1000ms 대기합니다.');
+                    await sleep(1000); // 1초 대기 추가
+
                     const deviceAddresses = await this.adapter.devices();
 
                     let targetDevice = null;
