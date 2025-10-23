@@ -101,6 +101,17 @@ class HeatingMatAccessory {
                     throw error;
                 }
 
+                if (error.message.includes('Not connected')) {
+                    this.log.warn(`[BLE Write] 'Not connected' 오류 감지. 연결 플래그 초기화 후 재시도 루프 시작.`);
+                    this.isConnected = false; // <-- 강제로 플래그를 false로 설정하여 루프 즉시 시작
+                }
+
+                if (attempt === maxRetries) {
+                    this.log.error(`[BLE Write] 최종 쓰기 실패. 연결 해제 및 재시도 루프 시작.`);
+                    this.disconnectDevice(); // 최종 실패 시 연결 해제 후 재연결 시도
+                    throw error;
+                }
+
                 // 실패했더라도 다음 재시도를 위해 딜레이 적용
                 await sleep(WRITE_DELAY_MS);
             }
@@ -543,6 +554,9 @@ class HeatingMatAccessory {
                 if (this.charSetUuid && this.initPacketHex) {
                     await this.sendInitializationPacket();
                 }
+
+                this.log.info('[BLE] Link Layer 안정화를 위해 1000ms 대기합니다.');
+                await sleep(1000);
 
                 // 1. 온도 특성 Notification 구독 시도
                 this.log.info(`[BLE] 온도 특성(${this.charTempUuid}) Notification 구독을 시도합니다.`);
