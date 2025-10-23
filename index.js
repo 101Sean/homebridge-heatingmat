@@ -224,7 +224,7 @@ class HeatingMatAccessory {
     }
 
     async sendTemperatureCommand(value, level) {
-        this.setTempTimeout = null;
+        this.setTempTimeout = null; // 타이머 완료
 
         const packet = this.createControlPacket(level);
         this.log.info(`[Temp Command] Level ${level} 명령 전송 시도. **패킷:** ${packet.toString('hex')}`);
@@ -392,6 +392,9 @@ class HeatingMatAccessory {
                     await sleep(5000);
                     await this.adapter.stopDiscovery();
 
+                    this.log.debug('[BLE] 스캔 중지 후 어댑터 상태 안정화를 위해 1000ms 대기합니다.');
+                    await sleep(1000);
+
                     const deviceAddresses = await this.adapter.devices();
 
                     let targetDevice = null;
@@ -437,6 +440,8 @@ class HeatingMatAccessory {
 
         try {
             this.log.info(`[BLE] 매트 연결 시도...`);
+            await sleep(500);
+
             await this.device.connect();
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
@@ -480,6 +485,9 @@ class HeatingMatAccessory {
                 if (this.setCharacteristic) {
                     await this.sendInitializationPacket();
                 }
+                this.log.info('[BLE] Link Layer 안정화를 위해 1000ms 대기합니다.');
+                await sleep(1000);
+
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
                 this.disconnectDevice(true);
