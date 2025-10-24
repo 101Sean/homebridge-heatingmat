@@ -1,9 +1,9 @@
 const NodeBle = require('node-ble');
 const util = require('util');
 
-// [최종 FIX] Keep-Alive 시간을 8초로 단축 (11초 타임아웃 대응)
 const WRITE_DELAY_MS = 300;
-const KEEP_ALIVE_INTERVAL_MS = 8000;
+const KEEP_ALIVE_INTERVAL_MS = 10000;
+const KEEP_ALIVE_INITIAL_DELAY_MS = 3000;
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
@@ -50,6 +50,7 @@ class HeatingMatAccessory {
         this.isScanningLoopActive = false;
 
         this.keepAliveTimer = null;
+        this.keepAliveInterval = null; // 인터벌 핸들러 추가
 
         this.setTempTimeout = null;
         this.lastSentLevel = -1;
@@ -67,28 +68,51 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
+    // 첫 번째 Keep-Alive 패킷 전송을 위한 래퍼 함수
+    async sendInitialKeepAlivePacket() {
+        try {
+            await this.sendInitializationPacket(true);
+            this.log.debug('[KeepAlive] 첫 번째 초기 Keep-Alive 패킷 전송 완료.');
+        } catch (e) {
+            this.log.debug('[KeepAlive] 첫 번째 Keep-Alive 패킷 전송 실패. 연결 해제 대기 중.');
+        }
+    }
+
+
     startKeepAlive() {
         this.stopKeepAlive();
-        this.log.debug(`[KeepAlive] ${KEEP_ALIVE_INTERVAL_MS / 1000}초 간격으로 Keep-Alive 타이머를 시작합니다.`);
+        this.log.debug(`[KeepAlive] ${KEEP_ALIVE_INITIAL_DELAY_MS / 1000}초 후 ${KEEP_ALIVE_INTERVAL_MS / 1000}초 간격으로 Keep-Alive 타이머를 시작합니다.`);
 
-        this.keepAliveTimer = setInterval(async () => {
-            if (this.isConnected) {
-                try {
-                    await this.sendInitializationPacket(true);
-                    this.log.debug('[KeepAlive] 초기화 패킷 재전송 (Keep-Alive).');
-                } catch (e) {
-                    this.log.debug('[KeepAlive] Keep-Alive 패킷 전송 실패. 연결 해제 대기 중.');
+        // 1. 초기 지연 시간 후 첫 번째 Keep-Alive 패킷 전송 (3초)
+        this.keepAliveTimer = setTimeout(() => {
+            if (!this.isConnected) return;
+
+            this.sendInitialKeepAlivePacket();
+
+            // 2. 주기적인 Interval 시작 (10초)
+            this.keepAliveInterval = setInterval(async () => {
+                if (this.isConnected) {
+                    try {
+                        await this.sendInitializationPacket(true);
+                        this.log.debug('[KeepAlive] 초기화 패킷 재전송 (Keep-Alive).');
+                    } catch (e) {
+                        this.log.debug('[KeepAlive] Keep-Alive 패킷 전송 실패. 연결 해제 대기 중.');
+                    }
                 }
-            }
-        }, KEEP_ALIVE_INTERVAL_MS);
+            }, KEEP_ALIVE_INTERVAL_MS);
+        }, KEEP_ALIVE_INITIAL_DELAY_MS);
     }
 
     stopKeepAlive() {
         if (this.keepAliveTimer) {
-            clearInterval(this.keepAliveTimer);
+            clearTimeout(this.keepAliveTimer);
             this.keepAliveTimer = null;
-            this.log.debug('[KeepAlive] Keep-Alive 타이머를 중지합니다.');
         }
+        if (this.keepAliveInterval) {
+            clearInterval(this.keepAliveInterval);
+            this.keepAliveInterval = null;
+        }
+        this.log.debug('[KeepAlive] Keep-Alive 타이머를 중지합니다.');
     }
 
     async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = WRITE_DELAY_MS) {
@@ -152,6 +176,7 @@ class HeatingMatAccessory {
                 this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
             }
 
+            // Keep-Alive 패킷은 안정성을 위해 writeWithoutResponse가 아닌 write 요청으로 간주
             await this.setCharacteristic.writeValue(initPacket, { type: 'command' });
 
             if (!isKeepAlive) {
@@ -164,6 +189,7 @@ class HeatingMatAccessory {
                 this.disconnectDevice(true);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
             }
+            throw error; // Keep-Alive 실패 시 상위 함수에 전파
         }
     }
 
@@ -421,7 +447,7 @@ class HeatingMatAccessory {
                     await sleep(5000);
                     await this.adapter.stopDiscovery();
 
-                    // [최종 FIX] Scan Delay 강화 (2000ms -> 5000ms)
+                    // Scan Delay 강화 (5000ms 유지)
                     this.log.debug('[BLE] 스캔 중지 후 어댑터 상태 안정화를 위해 5000ms 대기합니다.');
                     await sleep(5000);
 
@@ -479,6 +505,9 @@ class HeatingMatAccessory {
                 this.disconnectDevice();
             });
 
+            // [최종 FIX] 연결 성공 후 GATT 탐색 전에 500ms 지연 추가 (le-connection-abort-by-local 방지 시도)
+            await sleep(500);
+
             await this.discoverCharacteristics();
 
         } catch (error) {
@@ -492,9 +521,6 @@ class HeatingMatAccessory {
 
         try {
             this.log.debug(`[BLE] 특성 탐색 대상 서비스: ${this.serviceUuid}`);
-
-            // [최종 FIX] 연결 직후 안정화 딜레이 제거 (Keep-Alive를 빠르게 시작하기 위함)
-            // await sleep(2000);
 
             const gatt = await this.device.gatt();
 
@@ -512,9 +538,11 @@ class HeatingMatAccessory {
                 this.log.info('[BLE] 모든 필수 특성 (온도, 타이머) 발견. 제어 준비 완료.');
 
                 if (this.setCharacteristic) {
+                    // 최초 연결 후 Initialization Packet을 한번 더 보냅니다 (Keep-Alive와는 별개)
                     await this.sendInitializationPacket();
                 }
 
+                // 원본 앱의 3초 지연 로직으로 Keep-Alive 시작
                 this.startKeepAlive();
 
             } else {
