@@ -71,7 +71,7 @@ class HeatingMatAccessory {
 
         const writeOptions = { type: this.writeType };
         const writeTypeLog = this.writeType === 'request' ? 'Request (응답 대기)' : 'Command (응답 없음)';
-        const delayMs = 300; // Android App 코드 분석 결과 300ms 지연 사용
+        const delayMs = 300;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
@@ -79,7 +79,6 @@ class HeatingMatAccessory {
                 await characteristic.writeValue(packet, writeOptions);
                 this.log.debug(`[BLE Write] 쓰기 성공 (시도: ${attempt}/${maxRetries}, Type: ${writeTypeLog}).`);
 
-                // Android 앱에서 쓰기 후 사용하는 지연 시간 반영
                 await sleep(delayMs);
 
                 return true;
@@ -110,11 +109,8 @@ class HeatingMatAccessory {
 
         const buffer = Buffer.alloc(4);
 
-        // Left Zone
         buffer.writeUInt8(dataByte, 0);
         buffer.writeUInt8(checkSum, 1);
-
-        // Right Zone
         buffer.writeUInt8(dataByte, 2);
         buffer.writeUInt8(checkSum, 3);
 
@@ -244,11 +240,9 @@ class HeatingMatAccessory {
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
-                // safeWriteValue가 이제 this.writeType을 사용합니다.
                 await this.safeWriteValue(this.tempCharacteristic, packet);
                 this.lastSentLevel = level; // 성공 시 마지막 전송 레벨 업데이트
 
-                // --- HomeKit 상태 업데이트 (성공 시 즉시 반영) ---
                 this.currentState.targetTemp = value;
                 // HomeKit에서 CurrentTemperature는 목표 온도로 표시 (실제 읽기 불가)
                 this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
@@ -517,10 +511,6 @@ class HeatingMatAccessory {
             this.log.error('[BLE] config.json에 서비스 UUID와 특성 UUID를 전체 128비트 형식으로 정확히 입력했는지 확인해 주세요.');
             this.disconnectDevice(true);
         }
-    }
-
-    async readCurrentState() {
-        //this.log.debug('[Sync] readCurrentState 함수는 불안정성으로 인해 비활성화되었습니다.');
     }
 
     disconnectDevice(resetDevice = false) {
