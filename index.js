@@ -1,6 +1,10 @@
 const NodeBle = require('node-ble');
 const util = require('util');
 
+// [NEW] Keep-Alive 및 Write 관련 상수 추가
+const WRITE_DELAY_MS = 300;
+const KEEP_ALIVE_INTERVAL_MS = 20000; // 20초 (Link Layer Timeout 방지)
+
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
 const MIN_TEMP = 15;
@@ -45,6 +49,8 @@ class HeatingMatAccessory {
 
         this.isScanningLoopActive = false;
 
+        this.keepAliveTimer = null; // [FIX] Keep-Alive 타이머 변수 추가
+
         this.setTempTimeout = null;
         this.lastSentLevel = -1;
 
@@ -61,7 +67,35 @@ class HeatingMatAccessory {
         this.initNodeBle();
     }
 
-    async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = 300) {
+    // [FIX] Keep-Alive 시작 함수
+    startKeepAlive() {
+        this.stopKeepAlive();
+        this.log.debug(`[KeepAlive] ${KEEP_ALIVE_INTERVAL_MS / 1000}초 간격으로 Keep-Alive 타이머를 시작합니다.`);
+
+        this.keepAliveTimer = setInterval(async () => {
+            if (this.isConnected) {
+                try {
+                    // Keep-Alive 패킷 전송 (isKeepAlive=true로 로그 간소화)
+                    await this.sendInitializationPacket(true);
+                    this.log.debug('[KeepAlive] 초기화 패킷 재전송 (Keep-Alive).');
+                } catch (e) {
+                    // Keep-Alive 전송 오류는 무시하고 연결 해제 리스너가 처리하도록 합니다.
+                    this.log.debug('[KeepAlive] Keep-Alive 패킷 전송 실패. 연결 해제 대기 중.');
+                }
+            }
+        }, KEEP_ALIVE_INTERVAL_MS);
+    }
+
+    // [FIX] Keep-Alive 중지 함수
+    stopKeepAlive() {
+        if (this.keepAliveTimer) {
+            clearInterval(this.keepAliveTimer);
+            this.keepAliveTimer = null;
+            this.log.debug('[KeepAlive] Keep-Alive 타이머를 중지합니다.');
+        }
+    }
+
+    async safeWriteValue(characteristic, packet, maxRetries = 3, delayMs = WRITE_DELAY_MS) { // [FIX] delayMs 기본값 WRITE_DELAY_MS로 설정
         if (!this.isConnected) {
             throw new Error("Device not connected.");
         }
@@ -74,7 +108,7 @@ class HeatingMatAccessory {
                 await characteristic.writeValue(packet, writeOptions);
                 this.log.debug(`[BLE Write] 쓰기 성공 (시도: ${attempt}/${maxRetries}, Type: Command).`);
 
-                await sleep(500);
+                await sleep(delayMs); // [FIX] 500ms 대신 delayMs 사용
 
                 return true;
             } catch (error) {
@@ -112,28 +146,34 @@ class HeatingMatAccessory {
         return buffer;
     }
 
-    async sendInitializationPacket() {
+    // [FIX] sendInitializationPacket 함수 수정 (Keep-Alive 로그 구분)
+    async sendInitializationPacket(isKeepAlive = false) {
         if (!this.setCharacteristic || !this.isConnected || !this.initPacketHex) {
-            this.log.warn('[Init] 초기화 조건 불충족 (특성/연결/패킷). 건너뛰기.');
+            if (!isKeepAlive) this.log.warn('[Init] 초기화 조건 불충족 (특성/연결/패킷). 건너뛰기.');
             return;
         }
 
         try {
             const initPacket = Buffer.from(this.initPacketHex, 'hex');
-            this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
+            if (!isKeepAlive) { // Keep-Alive가 아닐 때만 로그 출력
+                this.log.info(`[Init] 초기화 패킷 전송 시도: ${this.initPacketHex}`);
+            }
 
+            // 초기화 패킷은 빠르게 전송하기 위해 'command' (Write Without Response)로 고정
             await this.setCharacteristic.writeValue(initPacket, { type: 'command' });
 
-            await sleep(500);
-
-            this.log.info('[Init] 초기화 패킷 전송 성공.');
+            if (!isKeepAlive) { // Keep-Alive가 아닐 때만 딜레이 및 성공 로그
+                await sleep(500);
+                this.log.info('[Init] 초기화 패킷 전송 성공.');
+            }
         } catch (error) {
-            this.log.error(`[Init] 초기화 패킷 전송 오류: ${error.message}`);
-            this.disconnectDevice(true);
-            throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+            if (!isKeepAlive) { // Keep-Alive가 아닐 때만 오류 로그 및 연결 해제
+                this.log.error(`[Init] 초기화 패킷 전송 오류: ${error.message}`);
+                this.disconnectDevice(true);
+                throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+            }
         }
     }
-
 
     initServices() {
         this.accessoryInformation = new this.Service.AccessoryInformation()
@@ -403,6 +443,10 @@ class HeatingMatAccessory {
                     await sleep(5000);
                     await this.adapter.stopDiscovery();
 
+                    // [FIX] Scan Delay 추가 (le-connection-abort-by-local 방지)
+                    this.log.debug('[BLE] 스캔 중지 후 어댑터 상태 안정화를 위해 1000ms 대기합니다.');
+                    await sleep(1000);
+
                     const deviceAddresses = await this.adapter.devices();
 
                     let targetDevice = null;
@@ -494,6 +538,8 @@ class HeatingMatAccessory {
                     await this.sendInitializationPacket();
                 }
 
+                this.startKeepAlive(); // [FIX] Keep-Alive 타이머 시작
+
             } else {
                 this.log.error(`[BLE] 필수 특성 중 하나를 찾을 수 없습니다. (온도: ${!!this.tempCharacteristic}, 타이머: ${!!this.timeCharacteristic}) 연결 해제.`);
                 this.disconnectDevice(true);
@@ -505,7 +551,10 @@ class HeatingMatAccessory {
         }
     }
 
+    // [FIX] disconnectDevice 함수 수정 (Keep-Alive 중지 및 isConnected() 제거)
     disconnectDevice(resetDevice = false) {
+        this.stopKeepAlive(); // [FIX] Keep-Alive 타이머 중지
+
         const deviceToDisconnect = this.device;
 
         this.isConnected = false;
@@ -518,11 +567,12 @@ class HeatingMatAccessory {
         }
 
         if (deviceToDisconnect) {
-            deviceToDisconnect.isConnected().then(connected => {
-                if(connected) {
-                    deviceToDisconnect.disconnect().catch(e => this.log.warn(`[BLE] 안전한 연결 해제 실패: ${e.message}`));
+            // [FIX] 불필요한 isConnected() 호출 제거. disconnect()만 시도하고 오류를 안전하게 처리.
+            deviceToDisconnect.disconnect().catch(e => {
+                if (!e.message.includes('not connected') && !e.message.includes('does not exist')) {
+                    this.log.warn(`[BLE] 안전한 연결 해제 실패 (D-Bus 오류 방지): ${e.message}`);
                 }
-            }).catch(e => this.log.warn(`[BLE] 연결 상태 확인 중 오류 발생 (무시): ${e.message}`));
+            });
         }
     }
 
