@@ -1,9 +1,8 @@
 const NodeBle = require('node-ble');
 const util = require('util');
 
-// [NEW] Keep-Alive 및 Write 관련 상수 추가
 const WRITE_DELAY_MS = 300;
-const KEEP_ALIVE_INTERVAL_MS = 20000; // 20초 (Link Layer Timeout 방지)
+const KEEP_ALIVE_INTERVAL_MS = 10000;
 
 const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
 const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
@@ -443,9 +442,8 @@ class HeatingMatAccessory {
                     await sleep(5000);
                     await this.adapter.stopDiscovery();
 
-                    // [FIX] Scan Delay 추가 (le-connection-abort-by-local 방지)
-                    this.log.debug('[BLE] 스캔 중지 후 어댑터 상태 안정화를 위해 1000ms 대기합니다.');
-                    await sleep(1000);
+                    this.log.debug('[BLE] 스캔 중지 후 어댑터 상태 안정화를 위해 2000ms 대기합니다.');
+                    await sleep(2000);
 
                     const deviceAddresses = await this.adapter.devices();
 
