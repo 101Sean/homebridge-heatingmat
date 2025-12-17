@@ -5,13 +5,13 @@ const WRITE_DELAY_MS = 300;
 const KEEP_ALIVE_INTERVAL_MS = 10000;
 const KEEP_ALIVE_INITIAL_DELAY_MS = 3000;
 
-const TEMP_LEVEL_MAP = { 15: 0, 20: 1, 25: 2, 30: 3, 35: 4, 40: 5, 45: 6, 50: 7 };
-const LEVEL_TEMP_MAP = { 0: 15, 1: 20, 2: 25, 3: 30, 4: 35, 5: 40, 6: 45, 7: 50 };
-const MIN_TEMP = 15;
-const MAX_TEMP = 50;
-const DEFAULT_HEAT_TEMP = 30;
+const TEMP_LEVEL_MAP = { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 };
+const LEVEL_TEMP_MAP = { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 };
+const MIN_TEMP = 0;
+const MAX_TEMP = 42;
+const DEFAULT_HEAT_TEMP = 38;
 
-const MAX_TIMER_HOURS = 15;
+const MAX_TIMER_HOURS = 12; // maximum 15
 const BRIGHTNESS_PER_HOUR = 100 / MAX_TIMER_HOURS;
 
 const sleep = util.promisify(setTimeout);
@@ -56,7 +56,7 @@ class HeatingMatAccessory {
         this.lastSentLevel = -1;
 
         this.currentState = {
-            targetTemp: DEFAULT_HEAT_TEMP,
+            targetTemp: 0, // DEFAULT_HEAT_TEMP,
             currentTemp: MIN_TEMP,
             currentHeatingCoolingState: this.Characteristic.CurrentHeatingCoolingState.OFF,
             timerHours: 0,
@@ -202,7 +202,7 @@ class HeatingMatAccessory {
         this.thermostatService = new this.Service.Thermostat(this.name + ' 온도');
 
         this.thermostatService.getCharacteristic(this.Characteristic.TargetTemperature)
-            .setProps({ minValue: MIN_TEMP, maxValue: MAX_TEMP, minStep: 5 })
+            .setProps({ minValue: MIN_TEMP, maxValue: MAX_TEMP, minStep: 1 })
             .onSet(this.handleSetTargetTemperature.bind(this))
             .onGet(() => this.currentState.targetTemp);
 
@@ -244,7 +244,7 @@ class HeatingMatAccessory {
 
     async handleSetTargetHeatingCoolingState(value) {
         if (value === this.Characteristic.TargetHeatingCoolingState.OFF) {
-            this.log.info('[HomeKit] 전원 OFF 명령 수신. Level 0 (15°C)로 설정합니다.');
+            this.log.info('[HomeKit] 전원 OFF 명령 수신. Level 0 으로 설정합니다.');
             this.handleSetTargetTemperature(MIN_TEMP);
 
         } else if (value === this.Characteristic.TargetHeatingCoolingState.HEAT) {
@@ -254,13 +254,14 @@ class HeatingMatAccessory {
     }
 
     handleSetTargetTemperature(value) {
-        let level = TEMP_LEVEL_MAP[Math.round(value / 5) * 5] || 0;
-        if (value < MIN_TEMP) level = 0;
-        if (value >= MAX_TEMP) level = 7;
+        let level = 0;
 
-        this.log.debug(`[Temp Debounce] HomeKit ${value}°C 설정 -> Level ${level}. (최종 명령 대기 중)`);
+        if (value <= 0) level = 0;
+        else if (value < 36) level = 1;
+        else if (value >= 42) level = 7;
+        else level = value - 35;
 
-        if (level === this.lastSentLevel && this.currentState.targetTemp === value) {
+        if (level === this.lastSentLevel) {
             this.log.info(`[Temp Debounce] Level ${level}은 이미 전송된 값입니다. 명령 전송을 건너뜁니다.`);
             return;
         }
@@ -282,20 +283,20 @@ class HeatingMatAccessory {
         this.setTempTimeout = null;
 
         const packet = this.createControlPacket(level);
-        this.log.info(`[Temp Command] Level ${level} 명령 전송 시도. **패킷:** ${packet.toString('hex')}`);
+        this.log.debug(`[Temp Command] Level ${level} 명령 전송 시도. **패킷:** ${packet.toString('hex')}`);
 
         if (this.tempCharacteristic && this.isConnected) {
             try {
                 await this.safeWriteValue(this.tempCharacteristic, packet);
                 this.lastSentLevel = level;
 
-                this.currentState.targetTemp = value;
+                this.currentState.targetTemp = LEVEL_TEMP_MAP[level];
                 this.currentState.currentTemp = LEVEL_TEMP_MAP[level];
                 this.currentState.currentHeatingCoolingState =
                     level > 0 ? this.Characteristic.CurrentHeatingCoolingState.HEAT : this.Characteristic.CurrentHeatingCoolingState.OFF;
 
                 if (level > 0) {
-                    this.currentState.lastHeatTemp = value;
+                    this.currentState.lastHeatTemp = LEVEL_TEMP_MAP[level];
                 }
 
                 this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
