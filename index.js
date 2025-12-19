@@ -255,20 +255,32 @@ class HeatingMatAccessory {
 
     handleSetTargetTemperature(value) {
         let level = 0;
+        let displayTemp = 0;
 
-        if (value <= 0) level = 0;
-        else if (value < 36) level = 1;
-        else if (value >= 42) level = 7;
-        else level = value - 35;
+        if (value <= 0) {
+            level = 0;
+            displayTemp = 0;
+        } else {
+            if (value < 36) value = 36;
+
+            if (value >= 42) {
+                level = 7;
+                displayTemp = 42;
+            } else {
+                level = value - 35;
+                displayTemp = value;
+            }
+        }
 
         if (level === this.lastSentLevel) {
-            this.log.info(`[Temp Debounce] Level ${level}은 이미 전송된 값입니다. 명령 전송을 건너뜁니다.`);
+            if (this.currentState.targetTemp !== displayTemp) {
+                this.currentState.targetTemp = displayTemp;
+                this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, displayTemp);
+            }
             return;
         }
 
-        if (this.setTempTimeout) {
-            clearTimeout(this.setTempTimeout);
-        }
+        if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
 
         this.setTempTimeout = setTimeout(async () => {
             try {
@@ -387,7 +399,7 @@ class HeatingMatAccessory {
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
-                await this.safeWriteValue(this.timeCharacteristic, packet);
+                await this.safeWriteValue(this.timeCharacteristic, ₩);
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
