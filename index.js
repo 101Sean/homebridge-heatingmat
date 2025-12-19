@@ -7,7 +7,7 @@ const KEEP_ALIVE_INITIAL_DELAY_MS = 3000;
 
 const TEMP_LEVEL_MAP = { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 };
 const LEVEL_TEMP_MAP = { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 };
-const MIN_TEMP = 0;
+const MIN_TEMP = 36;
 const MAX_TEMP = 42;
 const DEFAULT_HEAT_TEMP = 38;
 
