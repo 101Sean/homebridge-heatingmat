@@ -255,28 +255,26 @@ class HeatingMatAccessory {
 
     handleSetTargetTemperature(value) {
         let level = 0;
-        let displayTemp = 0;
+        let newTargetTemp = 0;
 
         if (value <= 0) {
             level = 0;
-            displayTemp = 0;
+            newTargetTemp = 0;
         } else {
             if (value < 36) value = 36;
+            if (value > 42) value = 42;
 
-            if (value >= 42) {
-                level = 7;
-                displayTemp = 42;
-            } else {
-                level = value - 35;
-                displayTemp = value;
-            }
+            level = value - 35;
+            newTargetTemp = value;
         }
 
+        this.currentState.targetTemp = newTargetTemp;
+        this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, newTargetTemp);
+
+        this.log.debug(`[Temp] 요청 ${value}°C → ${newTargetTemp > 0 ? 'HEAT' : 'OFF'} (레벨 ${level})`);
+
         if (level === this.lastSentLevel) {
-            if (this.currentState.targetTemp !== displayTemp) {
-                this.currentState.targetTemp = displayTemp;
-                this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, displayTemp);
-            }
+            this.log.info(`[Temp Debounce] 동일 레벨 ${level} → 명령 생략`);
             return;
         }
 
@@ -284,9 +282,9 @@ class HeatingMatAccessory {
 
         this.setTempTimeout = setTimeout(async () => {
             try {
-                await this.sendTemperatureCommand(value, level);
+                await this.sendTemperatureCommand(newTargetTemp, level);
             } catch (e) {
-                this.log.error(`[Temp Debounce Final Error] 온도 설정 명령 처리 중 BLE 통신 오류 발생: ${e.message}. 프로세스 크래시 방지.`);
+                this.log.error(`[Temp Error] ${e.message}`);
             }
         }, 350);
     }
@@ -406,7 +404,7 @@ class HeatingMatAccessory {
             }
         } else {
             if (hours === 0) {
-                this.log.warn('[Timer] [Startup Skip] BLE 연결이 없어 타이머 0시간 (OFF) 명령 전송을 건너킵니다.');
+                this.log.warn('[Timer] [Startup Skip] BLE 연결이 없어 타이머 0시간 (OFF) 명령 전송을 건너뜁니다.');
                 return;
             } else {
                 this.log.warn('[Timer] BLE 연결 없음. 명령 전송 불가. (백그라운드에서 재연결 시도 중)');
@@ -602,5 +600,5 @@ class HeatingMatAccessory {
 }
 
 module.exports = (api) => {
-    api.registerAccessory('homebridge-heatingmat', 'HeatingMatAccessory', HeatingMatAccessory);
+    api.registerAccessory('homebridge-heatingmat', 'Heating Mat', HeatingMatAccessory);
 };
