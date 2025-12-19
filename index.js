@@ -399,7 +399,7 @@ class HeatingMatAccessory {
 
         if (this.timeCharacteristic && this.isConnected) {
             try {
-                await this.safeWriteValue(this.timeCharacteristic, ₩);
+                await this.safeWriteValue(this.timeCharacteristic, packet);
             } catch (error) {
                 this.log.error(`[Timer] BLE 쓰기 오류 (시간: ${hours}): ${error.message}`);
                 throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
