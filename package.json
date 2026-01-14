@@ -15,9 +15,16 @@
     "bluetooth",
     "mattress"
   ],
+  "homebridge": {
+    "platforms": [
+      {
+        "platform": "Heating Mat Platform",
+        "name": "Heating Mat Platform"
+      }
+    ]
+  },
   "dependencies": {
-    "node-ble": "^1.13.0",
-    "node.js": "^0.0.1-security"
+    "node-ble": "^1.13.0"
   },
   "peerDependencies": {
     "homebridge": ">=1.0.0"
