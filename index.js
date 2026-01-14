@@ -98,7 +98,7 @@ class HeatingMatPlatform {
 
         this.api.on('didFinishLaunching', () => {
             this.log.info('Heating Mat 플랫폼 로딩 완료');
-            this.setupDevices();
+            this.setupDevice();
         });
     }
 
@@ -107,23 +107,19 @@ class HeatingMatPlatform {
         this.accessories.push(accessory);
     }
 
-    setupDevices() {
-        if (!this.config.devices || !Array.isArray(this.config.devices)) {
-            this.log.warn('config.json에 기기 설정이 없습니다.');
-            return;
-        }
+    setupDevice() {
+        const deviceConfig = this.config;
+        const uuid = this.api.hap.uuid.generate('homebridge:heatingmat:' + deviceConfig.mac_address);
+        const existingAccessory = this.accessories.find(acc => acc.UUID === uuid);
 
-        for (const deviceConfig of this.config.devices) {
-            const uuid = this.api.hap.uuid.generate('hb:heatmat:' + deviceConfig.mac_address);
-            const existingAccessory = this.accessories.find(acc => acc.UUID === uuid);
-
-            if (existingAccessory) {
-                new HeatingMatDevice(this.log, deviceConfig, this.api, existingAccessory);
-            } else {
-                const accessory = new this.api.platformAccessory(deviceConfig.name, uuid);
-                new HeatingMatDevice(this.log, deviceConfig, this.api, accessory);
-                this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-            }
+        if (existingAccessory) {
+            this.log.info('기존 액세서리 복구:', existingAccessory.displayName);
+            new HeatingMatDevice(this.log, deviceConfig, this.api, existingAccessory);
+        } else {
+            this.log.info('새 액세서리 등록:', deviceConfig.name || 'Heating Mat');
+            const accessory = new this.api.platformAccessory(deviceConfig.name || 'Heating Mat', uuid);
+            new HeatingMatDevice(this.log, deviceConfig, this.api, accessory);
+            this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
         }
     }
 }
@@ -373,5 +369,5 @@ class HeatingMatDevice {
 }
 
 module.exports = (api) => {
-    api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, HeatingMatPlatform);
+    api.registerPlatform(PLATFORM_NAME, HeatingMatPlatform);
 };
