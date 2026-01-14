@@ -154,6 +154,7 @@ class HeatingMatAccessory {
         this.api = api;
         this.Service = api.hap.Service;
         this.Characteristic = api.hap.Characteristic;
+        this.name = config.name || 'Heating Mat';
 
         this.state = {
             temp: CONFIG.DEFAULT_TEMP,
@@ -166,52 +167,54 @@ class HeatingMatAccessory {
         this.ble.init();
     }
 
-    setupAccessory(config) {
-        this.accessory = new this.api.platformAccessory(
-            config.name || ACCESSORY_NAME,
-            this.api.hap.uuid.generate(config.mac_address),
+    initServices() {
+        this.infoService = new this.Service.AccessoryInformation()
+            .setCharacteristic(this.Characteristic.Manufacturer, 'SOLZAM')
+            .setCharacteristic(this.Characteristic.Model, 'BLE Heating Mat')
+            .setCharacteristic(this.Characteristic.SerialNumber, 'HM-' + Date.now());
+
+        this.thermostatService = new this.Service.Thermostat(
+            this.name,
+            'thermostat',
         );
 
-        const info = this.accessory.addService(this.Service.AccessoryInformation);
-        info
-            .setCharacteristic(this.Characteristic.Manufacturer, 'Homebridge')
-            .setCharacteristic(this.Characteristic.Model, 'Heating Mat')
-            .setCharacteristic(this.Characteristic.SerialNumber, config.mac_address);
-
-        this.thermo = this.accessory.addService(this.Service.Thermostat);
-
-        this.thermo
+        this.thermostatService
             .getCharacteristic(this.Characteristic.TargetTemperature)
             .setProps({ minValue: 36, maxValue: 42, minStep: 1 })
             .onSet(this.setTemp.bind(this))
             .onGet(() => this.state.temp);
 
-        this.thermo
+        this.thermostatService
             .getCharacteristic(this.Characteristic.CurrentTemperature)
             .onGet(() => this.state.temp);
 
-        this.thermo
+        this.thermostatService
             .getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
             .onSet(this.setPower.bind(this))
             .onGet(() => (this.state.heating ? 1 : 0));
 
-        this.timer = this.accessory.addService(this.Service.Lightbulb, 'Timer');
+        this.timerService = new this.Service.Lightbulb(
+            this.name + ' Timer',
+            'timer',
+        );
 
-        this.timer
+        this.timerService
             .getCharacteristic(this.Characteristic.On)
             .onSet(v => this.setTimer(v ? this.state.timerHours || 1 : 0))
             .onGet(() => this.state.timerHours > 0);
 
-        this.timer
+        this.timerService
             .getCharacteristic(this.Characteristic.Brightness)
             .onSet(v => this.setTimer(Math.round(v / CONFIG.BRIGHTNESS_PER_HOUR)))
             .onGet(() => this.state.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
+    }
 
-        this.api.registerPlatformAccessories(
-            PLUGIN_NAME,
-            ACCESSORY_NAME,
-            [this.accessory],
-        );
+    getServices() {
+        return [
+            this.infoService,
+            this.thermostatService,
+            this.timerService,
+        ];
     }
 
     async setTemp(v) {
