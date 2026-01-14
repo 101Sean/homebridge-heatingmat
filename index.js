@@ -161,7 +161,9 @@ class HeatingMatDevice {
         };
 
         this.initServices();
-        this.initBle();
+        this.initBle().catch(err => {
+            this.log.error(`BLE 시작 중 에러: ${err.message}`);
+        });
     }
 
     initServices() {
@@ -371,5 +373,5 @@ class HeatingMatDevice {
 }
 
 module.exports = (api) => {
-    api.registerPlatform(PLATFORM_NAME, HeatingMatPlatform);
+    api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, HeatingMatPlatform);
 };
