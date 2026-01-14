@@ -163,8 +163,9 @@ class HeatingMatAccessory {
         };
 
         this.ble = new BleController(log, config);
-        this.setupAccessory(config);
         this.ble.init();
+
+        this.initServices();
     }
 
     initServices() {
