@@ -1,6 +1,6 @@
 {
   "name": "homebridge-heatingmat",
-  "version": "1.0.7",
+  "version": "1.7",
   "description": "온열 매트 Homebridge 액세서리",
   "license": "ISC",
   "main": "index.js",
