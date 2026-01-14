@@ -2,27 +2,23 @@ const NodeBle = require('node-ble');
 const { promisify } = require('util');
 const sleep = promisify(setTimeout);
 
-// Constant
 const CONFIG = {
     WRITE_DELAY_MS: 300,
-    KEEP_ALIVE_INTERVAL_MS: 10000,
-    KEEP_ALIVE_INITIAL_DELAY_MS: 3000,
+    RETRY_COUNT: 3,
+    KEEP_ALIVE_INTERVAL: 10000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
     MAX_TEMP: 42,
     DEFAULT_HEAT_TEMP: 38,
-    MAX_TIMER_HOURS: 12,
     BRIGHTNESS_PER_HOUR: 100 / 12,
 };
 
 const PLUGIN_NAME = 'homebridge-heatingmat';
 const PLATFORM_NAME = 'Heating Mat Platform';
 
-
-// Packet
 function createControlPacket(value) {
-    const dataByte = value;
+    const dataByte = value & 0xFF;
     const checkSum = (0xFF - dataByte) & 0xFF;
     const buffer = Buffer.alloc(4);
     buffer.writeUInt8(dataByte, 0);
@@ -33,18 +29,10 @@ function createControlPacket(value) {
 }
 
 function parsePacket(buffer) {
-    if (!buffer || buffer.length < 4) {
-        if (buffer.length >= 1) {
-            const val = buffer.readUInt8(0);
-            return (val > 12 && val < 255) ? (255 - val) : val;
-        }
-        return 255;
-    }
-    return buffer.readUInt8(3); // Target Value
+    if (!buffer || buffer.length < 4) return 255;
+    return buffer.readUInt8(3);
 }
 
-
-// BLE
 class BleManager {
     constructor(log, config) {
         this.log = log;
@@ -87,45 +75,6 @@ class BleManager {
     }
 }
 
-
-// HB Platform
-class HeatingMatPlatform {
-    constructor(log, config, api) {
-        this.log = log;
-        this.api = api;
-        this.config = config || {};
-        this.accessories = [];
-
-        this.api.on('didFinishLaunching', () => {
-            this.log.info('Heating Mat 플랫폼 로딩 완료');
-            this.setupDevice();
-        });
-    }
-
-    configureAccessory(accessory) {
-        this.log.info('캐시 복구 기기:', accessory.displayName);
-        this.accessories.push(accessory);
-    }
-
-    setupDevice() {
-        const deviceConfig = this.config;
-        const uuid = this.api.hap.uuid.generate('homebridge:heatingmat:' + deviceConfig.mac_address);
-        const existingAccessory = this.accessories.find(acc => acc.UUID === uuid);
-
-        if (existingAccessory) {
-            this.log.info('기존 액세서리 복구:', existingAccessory.displayName);
-            new HeatingMatDevice(this.log, deviceConfig, this.api, existingAccessory);
-        } else {
-            this.log.info('새 액세서리 등록:', deviceConfig.name || 'Heating Mat');
-            const accessory = new this.api.platformAccessory(deviceConfig.name || 'Heating Mat', uuid);
-            new HeatingMatDevice(this.log, deviceConfig, this.api, accessory);
-            this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-        }
-    }
-}
-
-
-// Accessory
 class HeatingMatDevice {
     constructor(log, config, api, accessory) {
         this.log = log;
@@ -138,35 +87,26 @@ class HeatingMatDevice {
         this.bleManager = new BleManager(log, config);
         this.isConnected = false;
         this.device = null;
-        this.tempCharacteristic = null;
-        this.timeCharacteristic = null;
-        this.setCharacteristic = null;
-
-        this.keepAliveTimer = null;
-        this.keepAliveInterval = null;
         this.setTempTimeout = null;
-        this.lastSentLevel = -1;
 
         this.currentState = {
-            targetTemp: 0,
-            currentTemp: CONFIG.MIN_TEMP,
-            currentHeatingCoolingState: this.Characteristic.CurrentHeatingCoolingState.OFF,
+            targetTemp: CONFIG.DEFAULT_HEAT_TEMP,
+            currentTemp: CONFIG.DEFAULT_HEAT_TEMP,
+            currentHeatingCoolingState: 0,
             timerHours: 0,
             timerOn: false,
             lastHeatTemp: CONFIG.DEFAULT_HEAT_TEMP
         };
 
         this.initServices();
-        this.initBle().catch(err => {
-            this.log.error(`BLE 시작 중 에러: ${err.message}`);
-        });
+        this.initBle();
     }
 
     initServices() {
         const info = this.accessory.getService(this.Service.AccessoryInformation) ||
             this.accessory.addService(this.Service.AccessoryInformation);
-        info.setCharacteristic(this.Characteristic.Manufacturer, 'Generic Mat')
-            .setCharacteristic(this.Characteristic.Model, 'BLE Heating Mat')
+        info.setCharacteristic(this.Characteristic.Manufacturer, 'Homebridge')
+            .setCharacteristic(this.Characteristic.Model, 'Heating Mat')
             .setCharacteristic(this.Characteristic.SerialNumber, this.config.mac_address);
 
         this.thermostat = this.accessory.getService(this.Service.Thermostat) ||
@@ -181,13 +121,9 @@ class HeatingMatDevice {
             .onGet(() => this.currentState.currentTemp);
 
         this.thermostat.getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
-            .setProps({ validValues: [0, 1] }) // OFF, HEAT
+            .setProps({ validValues: [0, 1] })
             .onSet(this.handleSetTargetHeatingCoolingState.bind(this))
-            .onGet(() => this.currentState.currentHeatingCoolingState === 0 ? 0 : 1);
-
-        this.thermostat.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState)
             .onGet(() => this.currentState.currentHeatingCoolingState);
-
 
         this.timer = this.accessory.getService(this.Service.Lightbulb) ||
             this.accessory.addService(this.Service.Lightbulb, this.config.name + ' 타이머');
@@ -209,70 +145,85 @@ class HeatingMatDevice {
                 this.device = device;
                 await this.connectDevice();
             });
-        } catch (e) { this.log.error(`[${this.config.name}] BLE 초기화 실패`); }
+        } catch (e) { this.log.error(`[${this.config.name}] BLE 초기화 실패: ${e.message}`); }
     }
 
     async connectDevice() {
         if (this.isConnected) return;
         try {
-            this.log.info(`[${this.config.name}] 블루투스 연결 시도...`);
+            this.log.info(`[${this.config.name}] 매트 연결 시도...`);
             await this.device.connect();
             await sleep(2000);
             this.isConnected = true;
             this.bleManager.isDeviceConnected = true;
+
             this.device.on('disconnect', () => {
-                this.log.warn(`[${this.config.name}] 연결 끊김. 재검색 시작.`);
-                this.disconnect(true);
+                this.log.warn(`[${this.config.name}] 연결 끊김. 재연결 대기.`);
+                this.isConnected = false;
+                this.bleManager.isDeviceConnected = false;
             });
+
             await this.discover();
-        } catch (e) { this.log.error("연결 실패"); this.disconnect(true); }
+        } catch (e) { this.log.error("연결 실패"); this.isConnected = false; }
     }
 
     async discover() {
         try {
             const gatt = await this.device.gatt();
             const service = await gatt.getPrimaryService(this.bleManager.serviceUuid);
-            this.tempCharacteristic = await service.getCharacteristic(this.bleManager.charTempUuid);
-            this.timeCharacteristic = await service.getCharacteristic(this.bleManager.charTimeUuid);
+            this.tempChar = await service.getCharacteristic(this.charTempUuid);
+            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
             if (this.bleManager.charSetUuid) {
-                this.setCharacteristic = await service.getCharacteristic(this.bleManager.charSetUuid);
-                await this.sendInitPacket();
+                this.setChar = await service.getCharacteristic(this.bleManager.charSetUuid);
+                await this.writeRaw(this.setChar, Buffer.from(this.bleManager.initPacketHex, 'hex'));
             }
 
-            await this.tempCharacteristic.startNotifications();
-            this.tempCharacteristic.on('valuechanged', (data) => this.handleNotification(data, 'temp'));
-            await this.timeCharacteristic.startNotifications();
-            this.timeCharacteristic.on('valuechanged', (data) => this.handleNotification(data, 'timer'));
+            await this.tempChar.startNotifications();
+            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            await this.timeChar.startNotifications();
+            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
 
-            this.log.info(`[${this.config.name}] 모든 준비 완료`);
-            this.startKeepAlive();
-            await this.syncState();
-        } catch (e) { this.log.error("특성 탐색 실패"); this.disconnect(true); }
+            this.log.info(`[${this.config.name}] 앱 프로토콜 동기화 완료`);
+        } catch (e) { this.log.error("서비스 탐색 실패"); }
     }
 
-    async syncState() {
-        if (!this.isConnected) return;
-        try {
-            const tBuf = await this.tempCharacteristic.readValue();
-            const tLvl = parsePacket(tBuf);
-            const tVal = CONFIG.LEVEL_TEMP_MAP[tLvl] || 0;
+    async writeRaw(characteristic, packet) {
+        if (!this.isConnected || !characteristic) return false;
 
-            const bBuf = await this.timeCharacteristic.readValue();
-            const bVal = parsePacket(bBuf);
-
-            this.currentState.targetTemp = tVal;
-            this.currentState.currentTemp = tVal;
-            this.currentState.currentHeatingCoolingState = tLvl > 0 ? 1 : 0;
-            this.currentState.timerHours = bVal;
-            this.currentState.timerOn = bVal > 0;
-            if (tLvl > 0) this.currentState.lastHeatTemp = tVal;
-
-            this.updateHK();
-        } catch (e) { this.log.error("상태 동기화 실패"); }
+        for (let i = 0; i < CONFIG.RETRY_COUNT; i++) {
+            try {
+                await characteristic.writeValue(packet, { type: 'command' });
+                await sleep(CONFIG.WRITE_DELAY_MS);
+                return true;
+            } catch (e) {
+                this.log.warn(`쓰기 실패 (재시도 ${i+1}/${CONFIG.RETRY_COUNT})`);
+                await sleep(CONFIG.WRITE_DELAY_MS);
+            }
+        }
+        return false;
     }
 
-    updateHK() {
+    handleUpdate(data, type) {
+        const val = parsePacket(data);
+        if (val === 255) return;
+
+        if (type === 'temp') {
+            const t = CONFIG.LEVEL_TEMP_MAP[val];
+            if (t !== undefined) {
+                this.currentState.targetTemp = t;
+                this.currentState.currentTemp = t;
+                this.currentState.currentHeatingCoolingState = val > 0 ? 1 : 0;
+                if (val > 0) this.currentState.lastHeatTemp = t;
+            }
+        } else {
+            this.currentState.timerHours = val;
+            this.currentState.timerOn = val > 0;
+        }
+        this.updateHomeKit();
+    }
+
+    updateHomeKit() {
         this.thermostat.updateCharacteristic(this.Characteristic.TargetTemperature, this.currentState.targetTemp);
         this.thermostat.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
         this.thermostat.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
@@ -280,77 +231,27 @@ class HeatingMatDevice {
         this.timer.updateCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
     }
 
-    handleNotification(data, type) {
-        const val = parsePacket(data);
-        if (val === 0 || val === 255) return;
-        if (type === 'temp') {
-            const t = CONFIG.LEVEL_TEMP_MAP[val];
-            if (t) {
-                this.currentState.targetTemp = t;
-                this.currentState.currentTemp = t;
-                this.currentState.currentHeatingCoolingState = 1;
-                this.currentState.lastHeatTemp = t;
-                this.updateHK();
-            }
-        } else {
-            this.currentState.timerHours = val;
-            this.currentState.timerOn = val > 0;
-            this.updateHK();
-        }
-    }
-
-    async write(char, pkt) {
-        if (!this.isConnected || !char) return;
-        try { await char.writeValue(pkt, { type: 'command' }); await sleep(CONFIG.WRITE_DELAY_MS); } catch (e) { this.log.error("Write 실패"); }
-    }
-
-    async sendInitPacket(isKA = false) {
-        if (!this.isConnected || !this.setCharacteristic) return;
-        try { await this.setCharacteristic.writeValue(Buffer.from(this.bleManager.initPacketHex, 'hex'), { type: 'command' }); } catch (e) {}
-    }
-
-    startKeepAlive() {
-        this.stopKeepAlive();
-        this.keepAliveInterval = setInterval(() => {
-            if (this.isConnected) this.sendInitPacket(true);
-        }, CONFIG.KEEP_ALIVE_INTERVAL_MS);
-    }
-
-    stopKeepAlive() { if (this.keepAliveInterval) clearInterval(this.keepAliveInterval); }
-
-    disconnect(reset = false) {
-        this.stopKeepAlive();
-        this.isConnected = false;
-        this.bleManager.isDeviceConnected = false;
-        if (reset) this.device = null;
-    }
-
     async handleSetTargetHeatingCoolingState(value) {
-        if (value === 0) { // OFF
-            await this.handleSetTargetTemperature(36);
-            setTimeout(async () => {
-                await this.write(this.timeCharacteristic, Buffer.from([0x00, 0xff, 0x00, 0xff]));
-                this.currentState.timerOn = false;
-                this.currentState.timerHours = 0;
-                this.updateHK();
-            }, 500);
+        if (value === 0) {
+            await this.writeRaw(this.tempChar, createControlPacket(0));
             this.currentState.currentHeatingCoolingState = 0;
-        } else { // HEAT
-            this.handleSetTargetTemperature(this.currentState.lastHeatTemp || 38);
+        } else {
+            const level = CONFIG.TEMP_LEVEL_MAP[this.currentState.lastHeatTemp] || 3;
+            await this.writeRaw(this.tempChar, createControlPacket(level));
             this.currentState.currentHeatingCoolingState = 1;
         }
+        this.updateHomeKit();
     }
 
     async handleSetTargetTemperature(v) {
-        let level = v <= 35 ? 0 : (v > 42 ? 7 : v - 35);
-        this.currentState.targetTemp = v <= 35 ? 36 : v;
-        this.updateHK();
-
+        this.currentState.targetTemp = v;
         if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
+
         this.setTempTimeout = setTimeout(async () => {
-            await this.write(this.tempCharacteristic, createControlPacket(level));
-            if (level > 0) this.currentState.lastHeatTemp = this.currentState.targetTemp;
-        }, 350);
+            const level = CONFIG.TEMP_LEVEL_MAP[v] || 0;
+            const success = await this.writeRaw(this.tempChar, createControlPacket(level));
+            if (success && level > 0) this.currentState.lastHeatTemp = v;
+        }, 500);
     }
 
     async handleTimerSwitch(v) {
@@ -362,9 +263,41 @@ class HeatingMatDevice {
         const h = Math.round(v / CONFIG.BRIGHTNESS_PER_HOUR);
         this.currentState.timerHours = h;
         this.currentState.timerOn = h > 0;
-        const pkt = h === 0 ? Buffer.from([0x00, 0xff, 0x00, 0xff]) : createControlPacket(h);
-        await this.write(this.timeCharacteristic, pkt);
-        this.updateHK();
+        await this.writeRaw(this.timeChar, h === 0 ? Buffer.from([0x00, 0xff, 0x00, 0xff]) : createControlPacket(h));
+        this.updateHomeKit();
+    }
+}
+
+
+class HeatingMatPlatform {
+    constructor(log, config, api) {
+        this.log = log;
+        this.api = api;
+        this.config = config || {};
+        this.accessories = [];
+
+        this.api.on('didFinishLaunching', () => {
+            if (this.config.devices) {
+                this.config.devices.forEach(device => this.addDevice(device));
+            }
+        });
+    }
+
+    configureAccessory(accessory) {
+        this.accessories.push(accessory);
+    }
+
+    addDevice(deviceConfig) {
+        const uuid = this.api.hap.uuid.generate('heating:mat:' + deviceConfig.mac_address);
+        const existing = this.accessories.find(acc => acc.UUID === uuid);
+
+        if (existing) {
+            new HeatingMatDevice(this.log, deviceConfig, this.api, existing);
+        } else {
+            const accessory = new this.api.platformAccessory(deviceConfig.name, uuid);
+            new HeatingMatDevice(this.log, deviceConfig, this.api, accessory);
+            this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+        }
     }
 }
 
