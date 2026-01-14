@@ -5,6 +5,9 @@ const sleep = promisify(setTimeout);
 const CONFIG = {
     WRITE_DELAY_MS: 300,
     RETRY_COUNT: 3,
+    RECONNECT_DELAY: 5000,
+    CONNECT_TIMEOUT: 30000,
+    HEALTH_CHECK_INTERVAL: 30000,
     KEEP_ALIVE_INTERVAL: 10000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
@@ -69,7 +72,9 @@ class BleManager {
                         break;
                     }
                 }
-            } catch (error) { this.log.error(`[BLE] 스캔 오류: ${error.message}`); }
+            } catch (error) {
+                this.log.error(`[BLE] 스캔 오류: ${error.message}`);
+            }
             await sleep(5000);
         }
     }
@@ -88,6 +93,14 @@ class HeatingMatDevice {
         this.isConnected = false;
         this.device = null;
         this.setTempTimeout = null;
+        this.healthCheckInterval = null;
+        this.reconnectAttempts = 0;
+
+        this.connectionState = {
+            lastConnected: null,
+            lastDisconnected: null,
+            isHealthy: false
+        };
 
         this.currentState = {
             targetTemp: CONFIG.DEFAULT_HEAT_TEMP,
@@ -100,6 +113,7 @@ class HeatingMatDevice {
 
         this.initServices();
         this.initBle();
+        this.startHealthCheck();
     }
 
     initServices() {
@@ -145,34 +159,73 @@ class HeatingMatDevice {
                 this.device = device;
                 await this.connectDevice();
             });
-        } catch (e) { this.log.error(`[${this.config.name}] BLE 초기화 실패: ${e.message}`); }
+        } catch (e) {
+            this.log.error(`[${this.config.name}] BLE 초기화 실패: ${e.message}`);
+        }
     }
 
     async connectDevice() {
         if (this.isConnected) return;
-        try {
-            this.log.info(`[${this.config.name}] 매트 연결 시도...`);
-            await this.device.connect();
-            await sleep(2000);
-            this.isConnected = true;
-            this.bleManager.isDeviceConnected = true;
 
-            this.device.on('disconnect', () => {
-                this.log.warn(`[${this.config.name}] 연결 끊김. 재연결 대기.`);
+        const MAX_RETRIES = 3;
+
+        while (this.reconnectAttempts < MAX_RETRIES && !this.isConnected) {
+            try {
+                this.log.info(`[${this.config.name}] 매트 연결 시도... (${this.reconnectAttempts + 1}/${MAX_RETRIES})`);
+
+                const connectPromise = this.device.connect();
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('연결 타임아웃')), CONFIG.CONNECT_TIMEOUT)
+                );
+
+                await Promise.race([connectPromise, timeoutPromise]);
+                await sleep(2000);
+
+                this.isConnected = true;
+                this.bleManager.isDeviceConnected = true;
+                this.connectionState.lastConnected = Date.now();
+                this.connectionState.isHealthy = true;
+                this.reconnectAttempts = 0;
+
+                this.device.on('disconnect', async () => {
+                    this.log.warn(`[${this.config.name}] 연결 끊김. ${CONFIG.RECONNECT_DELAY/1000}초 후 재연결 시도...`);
+                    this.isConnected = false;
+                    this.bleManager.isDeviceConnected = false;
+                    this.connectionState.lastDisconnected = Date.now();
+                    this.connectionState.isHealthy = false;
+
+                    await sleep(CONFIG.RECONNECT_DELAY);
+                    this.reconnectAttempts = 0;
+                    await this.connectDevice();
+                });
+
+                await this.discover();
+                this.log.info(`[${this.config.name}] 연결 성공`);
+                break;
+
+            } catch (e) {
+                this.reconnectAttempts++;
+                this.log.error(`연결 실패 (${this.reconnectAttempts}/${MAX_RETRIES}): ${e.message}`);
                 this.isConnected = false;
-                this.bleManager.isDeviceConnected = false;
-            });
 
-            await this.discover();
-        } catch (e) { this.log.error("연결 실패"); this.isConnected = false; }
+                if (this.reconnectAttempts < MAX_RETRIES) {
+                    await sleep(3000 * this.reconnectAttempts);
+                } else {
+                    this.log.error(`[${this.config.name}] 최대 재시도 횟수 초과. 60초 후 다시 시도합니다.`);
+                    await sleep(60000);
+                    this.reconnectAttempts = 0;
+                }
+            }
+        }
     }
 
     async discover() {
         try {
             const gatt = await this.device.gatt();
             const service = await gatt.getPrimaryService(this.bleManager.serviceUuid);
-            this.tempChar = await service.getCharacteristic(this.charTempUuid);
-            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
+
+            this.tempChar = await service.getCharacteristic(this.bleManager.charTempUuid);
+            this.timeChar = await service.getCharacteristic(this.bleManager.charTimeUuid);
 
             if (this.bleManager.charSetUuid) {
                 this.setChar = await service.getCharacteristic(this.bleManager.charSetUuid);
@@ -181,11 +234,15 @@ class HeatingMatDevice {
 
             await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
 
-            this.log.info(`[${this.config.name}] 앱 프로토콜 동기화 완료`);
-        } catch (e) { this.log.error("서비스 탐색 실패"); }
+            this.log.info(`[${this.config.name}] 프로토콜 동기화 완료`);
+        } catch (e) {
+            this.log.error(`서비스 탐색 실패: ${e.message}`);
+            throw e;
+        }
     }
 
     async writeRaw(characteristic, packet) {
@@ -195,13 +252,43 @@ class HeatingMatDevice {
             try {
                 await characteristic.writeValue(packet, { type: 'command' });
                 await sleep(CONFIG.WRITE_DELAY_MS);
+
+                // 성공적으로 쓰기 완료
+                this.connectionState.isHealthy = true;
                 return true;
             } catch (e) {
-                this.log.warn(`쓰기 실패 (재시도 ${i+1}/${CONFIG.RETRY_COUNT})`);
+                this.log.warn(`쓰기 실패 (재시도 ${i+1}/${CONFIG.RETRY_COUNT}): ${e.message}`);
                 await sleep(CONFIG.WRITE_DELAY_MS);
+
+                if (i === CONFIG.RETRY_COUNT - 1) {
+                    this.connectionState.isHealthy = false;
+                }
             }
         }
+
         return false;
+    }
+
+    startHealthCheck() {
+        this.healthCheckInterval = setInterval(async () => {
+            if (!this.isConnected) {
+                this.log.warn('[Health Check] 연결 끊김 감지. 재연결 시도...');
+                this.reconnectAttempts = 0;
+                await this.connectDevice();
+            } else if (this.tempChar) {
+                // 실제 통신 테스트
+                try {
+                    await this.tempChar.readValue();
+                    this.connectionState.isHealthy = true;
+                } catch (e) {
+                    this.log.error(`[Health Check] 통신 오류 감지: ${e.message}`);
+                    this.connectionState.isHealthy = false;
+                    this.isConnected = false;
+                    this.reconnectAttempts = 0;
+                    await this.connectDevice();
+                }
+            }
+        }, CONFIG.HEALTH_CHECK_INTERVAL);
     }
 
     handleUpdate(data, type) {
@@ -233,24 +320,41 @@ class HeatingMatDevice {
 
     async handleSetTargetHeatingCoolingState(value) {
         if (value === 0) {
-            await this.writeRaw(this.tempChar, createControlPacket(0));
-            this.currentState.currentHeatingCoolingState = 0;
+            const success = await this.writeRaw(this.tempChar, createControlPacket(0));
+            if (success) {
+                this.currentState.currentHeatingCoolingState = 0;
+                this.updateHomeKit();
+            }
         } else {
             const level = CONFIG.TEMP_LEVEL_MAP[this.currentState.lastHeatTemp] || 3;
-            await this.writeRaw(this.tempChar, createControlPacket(level));
-            this.currentState.currentHeatingCoolingState = 1;
+            const success = await this.writeRaw(this.tempChar, createControlPacket(level));
+            if (success) {
+                this.currentState.currentHeatingCoolingState = 1;
+                this.updateHomeKit();
+            }
         }
-        this.updateHomeKit();
     }
 
     async handleSetTargetTemperature(v) {
         this.currentState.targetTemp = v;
+
         if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
 
         this.setTempTimeout = setTimeout(async () => {
             const level = CONFIG.TEMP_LEVEL_MAP[v] || 0;
             const success = await this.writeRaw(this.tempChar, createControlPacket(level));
-            if (success && level > 0) this.currentState.lastHeatTemp = v;
+
+            if (success && level > 0) {
+                this.currentState.lastHeatTemp = v;
+                this.log.info(`온도 설정 완료: ${v}°C (레벨 ${level})`);
+            } else if (!success) {
+                this.log.error(`온도 설정 실패: ${v}°C`);
+                // HomeKit에 이전 값 복원
+                this.thermostat.updateCharacteristic(
+                    this.Characteristic.TargetTemperature,
+                    this.currentState.lastHeatTemp
+                );
+            }
         }, 500);
     }
 
@@ -263,11 +367,27 @@ class HeatingMatDevice {
         const h = Math.round(v / CONFIG.BRIGHTNESS_PER_HOUR);
         this.currentState.timerHours = h;
         this.currentState.timerOn = h > 0;
-        await this.writeRaw(this.timeChar, h === 0 ? Buffer.from([0x00, 0xff, 0x00, 0xff]) : createControlPacket(h));
-        this.updateHomeKit();
+
+        const packet = h === 0 ? Buffer.from([0x00, 0xff, 0x00, 0xff]) : createControlPacket(h);
+        const success = await this.writeRaw(this.timeChar, packet);
+
+        if (success) {
+            this.updateHomeKit();
+            this.log.info(`타이머 설정 완료: ${h}시간`);
+        } else {
+            this.log.error(`타이머 설정 실패: ${h}시간`);
+        }
+    }
+
+    cleanup() {
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+        }
+        if (this.setTempTimeout) {
+            clearTimeout(this.setTempTimeout);
+        }
     }
 }
-
 
 class HeatingMatPlatform {
     constructor(log, config, api) {
@@ -275,11 +395,16 @@ class HeatingMatPlatform {
         this.api = api;
         this.config = config || {};
         this.accessories = [];
+        this.devices = [];
 
         this.api.on('didFinishLaunching', () => {
             if (this.config.devices) {
                 this.config.devices.forEach(device => this.addDevice(device));
             }
+        });
+
+        this.api.on('shutdown', () => {
+            this.devices.forEach(device => device.cleanup());
         });
     }
 
@@ -292,15 +417,17 @@ class HeatingMatPlatform {
         const existing = this.accessories.find(acc => acc.UUID === uuid);
 
         if (existing) {
-            new HeatingMatDevice(this.log, deviceConfig, this.api, existing);
+            const device = new HeatingMatDevice(this.log, deviceConfig, this.api, existing);
+            this.devices.push(device);
         } else {
             const accessory = new this.api.platformAccessory(deviceConfig.name, uuid);
-            new HeatingMatDevice(this.log, deviceConfig, this.api, accessory);
+            const device = new HeatingMatDevice(this.log, deviceConfig, this.api, accessory);
+            this.devices.push(device);
             this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
         }
     }
 }
 
 module.exports = (api) => {
-    api.registerPlatform(PLATFORM_NAME, HeatingMatPlatform);
+    api.registerPlatform(PLUGIN_NAME, PLATFORM_NAME, HeatingMatPlatform);
 };
