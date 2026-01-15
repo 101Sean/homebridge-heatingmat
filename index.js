@@ -86,6 +86,13 @@ class HeatingMatAccessory {
         }
     }
 
+    async withTimeout(promise, ms, name) {
+        const timeout = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`[TIMEOUT] ${name} (${ms}ms)`)), ms)
+        );
+        return Promise.race([promise, timeout]);
+    }
+
     async startScanningLoop() {
         while (true) {
             if (!this.isConnected) {
@@ -119,13 +126,9 @@ class HeatingMatAccessory {
         try {
             this.log.info(`[BLE] 매트 접속 시도...`);
 
-            await Promise.race([
-                this.device.connect(),
-                new Promise((_, reject) => setTimeout(() => reject(timeout(5000)), 5000))
-            ]);
+            await this.withTimeout(this.device.connect(), 7000, "Device Connect");
 
             this.isConnected = true;
-            this.abortCount = 0;
             this.log.info(`[BLE] 연결 성공.`);
 
             this.device.removeAllListeners('disconnect');
@@ -134,7 +137,7 @@ class HeatingMatAccessory {
                 this.cleanup();
             });
 
-            await this.discoverCharacteristics();
+            await this.withTimeout(this.discoverCharacteristics(), 10000, "Discover Characteristics");
         } catch (e) {
             if (e.message.includes('le-connection-abort-by-local')) {
                 this.abortCount++;
@@ -153,7 +156,7 @@ class HeatingMatAccessory {
         this.isConnected = false;
         this.stopPingLoop();
         if (this.device) {
-            this.device.disconnect().catch(() => {});
+            this.withTimeout(this.device.disconnect(), 2000, "Disconnect").catch(() => {});
             this.device = null;
         }
     }
@@ -171,9 +174,10 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
-            const gatt = await this.device.gatt();
+            const gatt = await this.withTimeout(this.device.gatt(), 5000, "GATT Server");
             await sleep(CONFIG.GATT_WAIT_MS);
-            const service = await gatt.getPrimaryService(this.serviceUuid);
+
+            const service = await this.withTimeout(gatt.getPrimaryService(this.serviceUuid), 5000, "Primary Service");
 
             this.setChar = await service.getCharacteristic(this.charSetUuid)
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
