@@ -356,18 +356,22 @@ class HeatingMatAccessory {
 
     async handleSetTargetTemperature(v) {
         this.currentState.targetTemp = v;
-        if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
+        this.currentState.currentTemp = v;
 
+        if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
         this.setTempTimeout = setTimeout(async () => {
             const level = CONFIG.TEMP_LEVEL_MAP[v] || 0;
             const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
             if (success) {
                 this.log.debug(`[제어] 온도 변경 -> ${v}°C (Level: ${level})`);
                 if (level > 0) this.currentState.lastHeatTemp = v;
+                this.updateHomeKit();
             } else {
                 this.log.error(`[오류] 온도 변경 실패 (${v}°C)`);
             }
         }, CONFIG.SET_TEMP_DEBOUNCE_MS);
+
+        this.updateHomeKit();
     }
 
     async handleSetTimerHours(v) {
