@@ -332,60 +332,56 @@ class HeatingMatAccessory {
     }
 
     async handleSetTargetHeatingCoolingState(value) {
-        const stateName = value === 0 ? 'OFF' : 'ON';
         const level = value === 0 ? 0 : (CONFIG.TEMP_LEVEL_MAP[this.currentState.lastHeatTemp] || 3);
-
-        this.log.info(`[홈킷 제어] 전원 ${stateName} 요청 (전송 레벨: ${level})`);
 
         const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
         if (success) {
             this.currentState.currentHeatingCoolingState = value;
             if (value === 0) {
-                this.log.info(`[제어 성공] 전원 꺼짐 (안전을 위해 타이머 1시간 유지됨)`);
+                this.log.debug(`[제어] 전원 OFF (이전 설정: ${this.currentState.lastHeatTemp}°C)`);
                 this.currentState.timerHours = 1;
                 this.currentState.timerOn = false;
+
+                const timerPacket = this.createControlPacket(1);
+                await sleep(CONFIG.WRITE_DELAY_MS);
+                await this.writeRaw(this.timeChar, timerPacket);
             } else {
-                this.log.info(`[제어 성공] 전원 켜짐 (이전 온도: ${this.currentState.lastHeatTemp}°C)`);
+                this.log.info(`[제어] 전원 ON (${this.currentState.lastHeatTemp}°C)`);
             }
             this.updateHomeKit();
         } else {
-            this.log.error(`[제어 실패] 전원 ${stateName} 명령이 매트에 전달되지 않았습니다.`);
+            this.log.error(`[오류] 전원 제어 패킷 전송 실패.`);
         }
     }
 
     async handleSetTargetTemperature(v) {
-        this.log.debug(`[홈킷 제어] 온도 설정 변경 요청: ${v}°C`);
         this.currentState.targetTemp = v;
-
         if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
+
         this.setTempTimeout = setTimeout(async () => {
             const level = CONFIG.TEMP_LEVEL_MAP[v] || 0;
-            this.log.debug(`[패킷 전송] 온도 ${v}°C (레벨 ${level}) 명령 발송`);
-
             const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
             if (success) {
-                this.log.info(`[제어 성공] 온도 설정 완료: ${v}°C`);
+                this.log.debug(`[제어] 온도 변경 -> ${v}°C (Level: ${level})`);
                 if (level > 0) this.currentState.lastHeatTemp = v;
             } else {
-                this.log.error(`[제어 실패] 온도 설정 명령 전송 실패`);
+                this.log.error(`[오류] 온도 변경 실패 (${v}°C)`);
             }
         }, CONFIG.SET_TEMP_DEBOUNCE_MS);
     }
 
     async handleSetTimerHours(v) {
         const h = Math.round(v / CONFIG.BRIGHTNESS_PER_HOUR);
-        this.log.debug(`[홈킷 제어] 타이머 변경 요청: ${h}시간`);
-
         const packet = h === 0 ? Buffer.from([0x00, 0xff, 0x00, 0xff]) : this.createControlPacket(h);
-        const success = await this.writeRaw(this.timeChar, packet);
 
+        const success = await this.writeRaw(this.timeChar, packet);
         if (success) {
-            this.log.info(`[제어 성공] 타이머 ${h}시간으로 설정됨`);
+            this.log.debug(`[제어] 타이머 변경 -> ${h}시간`);
             this.currentState.timerHours = h;
             this.currentState.timerOn = h > 0;
             this.updateHomeKit();
         } else {
-            this.log.error(`[제어 실패] 타이머 설정 명령 전송 실패`);
+            this.log.error(`[오류] 타이머 변경 실패 (${h}시간)`);
         }
     }
 
