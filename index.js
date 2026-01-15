@@ -186,21 +186,32 @@ class HeatingMatAccessory {
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
             this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
+            await this.tempChar.startNotifications();
+            this.tempChar.on('valuechanged', (data) => {
+                this.log.info(`[BLE] 온도 데이터 수신: ${data.toString('hex')}`);
+                this.handleUpdate(data, 'temp');
+            });
+
+            await sleep(1000);
+            await this.timeChar.startNotifications();
+            this.timeChar.on('valuechanged', (data) => {
+                this.log.info(`[BLE] 타이머 데이터 수신: ${data.toString('hex')}`);
+                this.handleUpdate(data, 'timer');
+            });
+
+            await sleep(500);
+            const tVal = await this.tempChar.readValue().catch(() => null);
+            if (tVal) this.handleUpdate(tVal, 'temp');
+            const iVal = await this.timeChar.readValue().catch(() => null);
+            if (iVal) this.handleUpdate(iVal, 'timer');
+
             if (this.charSetUuid && this.initPacketHex) {
                 this.setChar = await service.getCharacteristic(this.charSetUuid);
-                const success = await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
-                if (success) this.log.info(`[BLE] 초기화 패킷 전송 완료`);
-                await sleep(1000);
+                await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
+                this.log.info(`[BLE] 초기화 패킷 전송 완료`);
             }
 
-            await this.tempChar.startNotifications();
-            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-            await sleep(500);
-
-            await this.timeChar.startNotifications();
-            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
-
-            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
+            this.log.info(`[BLE] 모든 서비스 준비 완료.`);
         } catch (e) {
             this.log.error(`[BLE] 탐색 중 오류: ${e.message}`);
             this.isConnected = false;
