@@ -4,12 +4,25 @@ const { exec } = require('child_process');
 const sleep = promisify(setTimeout);
 
 const CONFIG = {
-    WRITE_DELAY_MS: 300,
+    // Timeout, Interval
+    SCAN_DURATION_MS: 4000,       // 주변 기기 스캔 지속 시간
+    RECONNECT_DELAY_MS: 20000,    // 연결 유실 시 재시작까지 대기 (기기 세션 정리 시간)
+    CONNECT_TIMEOUT_MS: 7000,     // 물리적 연결 시도 타임아웃
+    GATT_TIMEOUT_MS: 10000,       // GATT 서버 및 서비스 탐색 타임아웃
+    DISCONNECT_TIMEOUT_MS: 2000,  // 연결 해제 시도 타임아웃
+    PING_INTERVAL_MS: 30000,      // Keep-alive 핑 주기
+
+    // Wait Time
+    GATT_WAIT_MS: 3000,           // 연결 성공 후 GATT 탐색 전 대기 (기기 안정화)
+    AUTH_WAIT_MS: 1000,           // 인증 패킷 전송 후 대기
+    NOTIFY_STEP_MS: 500,          // 알림 등록 사이의 미세 지연
+    NOTIFY_READY_MS: 1000,        // 모든 알림 등록 후 상태 요청 전 대기
+    POST_INIT_WAIT_MS: 1000,      // 초기화 완료 후 핑 시작 전 대기
+    WRITE_DELAY_MS: 500,          // 쓰기 실패 시 재시도 간격
+    SET_TEMP_DEBOUNCE_MS: 500,    // 온도 조절 시 연타 방지 디바운스
+
     RETRY_COUNT: 3,
-    RECONNECT_DELAY: 10000,
-    CONNECT_TIMEOUT: 20000,
-    GATT_WAIT_MS: 2000,
-    PING_INTERVAL: 15000,
+    ABORT_RETRY_LIMIT: 3,         // 로컬 중단 에러 몇 번 시 어댑터 리셋할지
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
@@ -101,7 +114,7 @@ class HeatingMatAccessory {
                     try { await this.adapter.stopDiscovery(); } catch(e) {}
 
                     await this.adapter.startDiscovery();
-                    await sleep(4000);
+                    await sleep(CONFIG.SCAN_DURATION_MS);
                     await this.adapter.stopDiscovery();
 
                     const devices = await this.adapter.devices();
@@ -116,15 +129,14 @@ class HeatingMatAccessory {
                     this.log.error(`[BLE] 스캔 루프 에러: ${e.message}`);
                 }
             }
-            await sleep(CONFIG.RECONNECT_DELAY);
+            await sleep(CONFIG.RECONNECT_DELAY_MS);
         }
     }
 
     async connectDevice() {
         try {
             this.log.info(`[BLE] 매트 접속 시도...`);
-
-            await this.withTimeout(this.device.connect(), 7000, "Device Connect");
+            await this.withTimeout(this.device.connect(), CONFIG.CONNECT_TIMEOUT_MS, "Device Connect");
 
             this.isConnected = true;
             this.log.info(`[BLE] 연결 성공.`);
@@ -135,7 +147,7 @@ class HeatingMatAccessory {
                 this.cleanup();
             });
 
-            await this.withTimeout(this.discoverCharacteristics(), 10000, "Discover Characteristics");
+            await this.discoverCharacteristics();
         } catch (e) {
             if (e.message.includes('le-connection-abort-by-local')) {
                 this.abortCount++;
@@ -154,7 +166,7 @@ class HeatingMatAccessory {
         this.isConnected = false;
         this.stopPingLoop();
         if (this.device) {
-            this.withTimeout(this.device.disconnect(), 2000, "Disconnect").catch(() => {});
+            this.withTimeout(this.device.disconnect(), CONFIG.DISCONNECT_TIMEOUT_MS, "Disconnect").catch(() => {});
             this.device = null;
         }
     }
@@ -172,10 +184,10 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
-            const gatt = await this.withTimeout(this.device.gatt(), 10000, "GATT Server");
+            const gatt = await this.withTimeout(this.device.gatt(), CONFIG.GATT_TIMEOUT_MS, "GATT Server");
             await sleep(CONFIG.GATT_WAIT_MS);
 
-            const service = await this.withTimeout(gatt.getPrimaryService(this.serviceUuid), 10000, "Primary Service");
+            const service = await this.withTimeout(gatt.getPrimaryService(this.serviceUuid), CONFIG.GATT_TIMEOUT_MS, "Primary Service");
 
             this.setChar = await service.getCharacteristic(this.charSetUuid)
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
@@ -183,19 +195,20 @@ class HeatingMatAccessory {
 
             this.log.info(`[BLE] 1단계: 인증 패킷 전송`);
             await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
-            await sleep(1000);
+            await sleep(CONFIG.AUTH_WAIT_MS);
 
             this.log.info(`[BLE] 2단계: 알림 리스너 등록`);
             await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-            await sleep(500);
+            await sleep(CONFIG.NOTIFY_STEP_MS);
 
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
-            await sleep(1000);
+            await sleep(CONFIG.NOTIFY_READY_MS);
 
             this.log.info(`[BLE] 3단계: 상태 요청(0x12) 전송`);
             await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
+            await sleep(CONFIG.POST_INIT_WAIT_MS);
 
             this.startPingLoop();
             this.log.info(`[BLE] 최종 연결 유지 프로세스 시작`);
@@ -219,7 +232,7 @@ class HeatingMatAccessory {
             } catch (e) {
                 this.log.warn(`[BLE] Ping 전송 실패, 연결 확인 필요.`);
             }
-        }, CONFIG.PING_INTERVAL);
+        }, CONFIG.PING_INTERVAL_MS);
     }
 
     stopPingLoop() {
@@ -234,7 +247,7 @@ class HeatingMatAccessory {
                 await characteristic.writeValue(packet, { type: 'command' });
                 return true;
             } catch (e) {
-                this.log.warn(`[BLE] 쓰기 실패 (${i+1}/3), ${CONFIG.WRITE_DELAY_MS}ms 후 재시도...`);
+                this.log.warn(`[BLE] 쓰기 실패 (${i+1}/${CONFIG.RETRY_COUNT}), ${CONFIG.WRITE_DELAY_MS}ms 후 재시도...`);
                 await sleep(CONFIG.WRITE_DELAY_MS);
             }
         }
@@ -319,37 +332,60 @@ class HeatingMatAccessory {
     }
 
     async handleSetTargetHeatingCoolingState(value) {
+        const stateName = value === 0 ? 'OFF' : 'ON';
         const level = value === 0 ? 0 : (CONFIG.TEMP_LEVEL_MAP[this.currentState.lastHeatTemp] || 3);
+
+        this.log.info(`[홈킷 제어] 전원 ${stateName} 요청 (전송 레벨: ${level})`);
+
         const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
         if (success) {
             this.currentState.currentHeatingCoolingState = value;
             if (value === 0) {
-                this.log.info(`[제어] 전원 OFF (타이머 1시간)`);
+                this.log.info(`[제어 성공] 전원 꺼짐 (안전을 위해 타이머 1시간 유지됨)`);
                 this.currentState.timerHours = 1;
                 this.currentState.timerOn = false;
+            } else {
+                this.log.info(`[제어 성공] 전원 켜짐 (이전 온도: ${this.currentState.lastHeatTemp}°C)`);
             }
             this.updateHomeKit();
+        } else {
+            this.log.error(`[제어 실패] 전원 ${stateName} 명령이 매트에 전달되지 않았습니다.`);
         }
     }
 
     async handleSetTargetTemperature(v) {
+        this.log.debug(`[홈킷 제어] 온도 설정 변경 요청: ${v}°C`);
         this.currentState.targetTemp = v;
+
         if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
         this.setTempTimeout = setTimeout(async () => {
             const level = CONFIG.TEMP_LEVEL_MAP[v] || 0;
+            this.log.debug(`[패킷 전송] 온도 ${v}°C (레벨 ${level}) 명령 발송`);
+
             const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
-            if (success && level > 0) this.currentState.lastHeatTemp = v;
-        }, 500);
+            if (success) {
+                this.log.info(`[제어 성공] 온도 설정 완료: ${v}°C`);
+                if (level > 0) this.currentState.lastHeatTemp = v;
+            } else {
+                this.log.error(`[제어 실패] 온도 설정 명령 전송 실패`);
+            }
+        }, CONFIG.SET_TEMP_DEBOUNCE_MS);
     }
 
     async handleSetTimerHours(v) {
         const h = Math.round(v / CONFIG.BRIGHTNESS_PER_HOUR);
+        this.log.debug(`[홈킷 제어] 타이머 변경 요청: ${h}시간`);
+
         const packet = h === 0 ? Buffer.from([0x00, 0xff, 0x00, 0xff]) : this.createControlPacket(h);
         const success = await this.writeRaw(this.timeChar, packet);
+
         if (success) {
+            this.log.info(`[제어 성공] 타이머 ${h}시간으로 설정됨`);
             this.currentState.timerHours = h;
             this.currentState.timerOn = h > 0;
             this.updateHomeKit();
+        } else {
+            this.log.error(`[제어 실패] 타이머 설정 명령 전송 실패`);
         }
     }
 
