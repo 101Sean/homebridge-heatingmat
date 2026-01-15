@@ -131,11 +131,12 @@ class HeatingMatAccessory {
             if (!this.isConnected) {
                 try {
                     this.log.debug(`[BLE] 기기 검색 중...`);
-                    this.device = null;
+                    this.cleanup();
 
                     await this.adapter.startDiscovery();
-                    await sleep(3000);
+                    await sleep(4000);
                     await this.adapter.stopDiscovery();
+                    await sleep(2000);
 
                     const devices = await this.adapter.devices();
                     let foundAddr = null;
@@ -150,19 +151,21 @@ class HeatingMatAccessory {
                     if (foundAddr) {
                         this.log.info(`[BLE] 매트 발견 (${foundAddr}), 연결 시도...`);
                         this.device = await this.adapter.getDevice(foundAddr);
+                        await sleep(1500);
 
                         await Promise.race([
                             this.connectDevice(),
-                            sleep(30000).then(() => { throw new Error('연결 프로세스 전체 타임아웃'); })
+                            sleep(25000).then(() => { throw new Error('연결 프로세스 전체 타임아웃'); })
                         ]);
                     }
                 } catch (e) {
                     this.log.error(`[BLE] 루프 에러 또는 타임아웃: ${e.message}`);
                     this.isConnected = false;
                     this.cleanup();
+                    try { await this.adapter.stopDiscovery(); } catch(i) {}
                 }
             }
-            await sleep(this.isConnected ? 5000 : 10000);
+            await sleep(this.isConnected ? 5000 : 15000);
         }
     }
 
