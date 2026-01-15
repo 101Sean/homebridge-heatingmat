@@ -256,8 +256,8 @@ class HeatingMatAccessory {
             this.currentState.currentHeatingCoolingState = value;
             if (value === 0) {
                 this.log.info(`[제어] 전원 OFF (타이머 1시간)`);
-                this.currentState.timerOn = false;
                 this.currentState.timerHours = 1;
+                this.currentState.timerOn = false;
             }
             this.updateHomeKit();
         }
