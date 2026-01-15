@@ -77,10 +77,10 @@ class HeatingMatAccessory {
                 return data;
             } else {
                 this.log.debug(`[BLE] 시스템 패킷 무시 (Data: ${data})`);
-                return this.currentState[characteristicType];
+                return null;
             }
         }
-        return this.currentState[characteristicType];
+        return null;
     }
 
     initServices() {
