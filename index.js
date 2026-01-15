@@ -5,9 +5,9 @@ const sleep = promisify(setTimeout);
 const CONFIG = {
     WRITE_DELAY_MS: 300,
     RETRY_COUNT: 3,
-    RECONNECT_DELAY: 5000,
-    CONNECT_TIMEOUT: 15000,
-    GATT_WAIT_MS: 500,
+    RECONNECT_DELAY: 15000,
+    CONNECT_TIMEOUT: 20000,
+    GATT_WAIT_MS: 1000,
     HEALTH_CHECK_INTERVAL: 30000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
@@ -37,7 +37,6 @@ class HeatingMatAccessory {
         this.device = null;
         this.adapter = null;
         this.isConnected = false;
-        this.reconnectAttempts = 0;
         this.healthCheckInterval = null;
         this.setTempTimeout = null;
 
@@ -55,6 +54,7 @@ class HeatingMatAccessory {
         this.startHealthCheck();
     }
 
+    // --- 데이터 패킷 처리 ---
     createControlPacket(value) {
         const dataByte = value & 0xFF;
         const checkSum = (0xFF - dataByte) & 0xFF;
@@ -66,25 +66,22 @@ class HeatingMatAccessory {
         return buffer;
     }
 
-    parsePacket(buffer, characteristicType) {
+    parsePacket(buffer, type) {
         if (!buffer || buffer.length < 4) return null;
-
         const b0 = buffer.readUInt8(0);
-        const b1 = buffer.readUInt8(1);
-        const b2 = buffer.readUInt8(2); // data
-        const b3 = buffer.readUInt8(3); // checksum
+        const b2 = buffer.readUInt8(2);
+        const b3 = buffer.readUInt8(3);
 
-        const isHeaderValid = ((b0 + b1) & 0xFF) === 0xFF;
-        const isDataValid = ((b2 + b3) & 0xFF) === 0xFF;
-
-        if (isHeaderValid && isDataValid) {
+        // 체크섬 검증 (Data + Checksum = 255)
+        if (((b2 + b3) & 0xFF) === 0xFF) {
             const actualValue = (0xFF - b2) & 0xFF;
-            if (characteristicType === 'temp' && b0 === 0xFC) return actualValue;
-            if (characteristicType === 'timer' && b0 === 0xF7) return actualValue;
+            if (type === 'temp' && b0 === 0xFC) return actualValue;
+            if (type === 'timer' && b0 === 0xF7) return actualValue;
         }
         return null;
     }
 
+    // --- HomeKit 서비스 설정 ---
     initServices() {
         this.informationService = new this.Service.AccessoryInformation()
             .setCharacteristic(this.Characteristic.Manufacturer, 'Generic Mat')
@@ -101,7 +98,7 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.currentTemp);
 
         this.thermostatService.getCharacteristic(this.Characteristic.TargetHeatingCoolingState)
-            .setProps({ validValues: [0, 1] }) // OFF, HEAT
+            .setProps({ validValues: [0, 1] })
             .onSet(this.handleSetTargetHeatingCoolingState.bind(this))
             .onGet(() => this.currentState.currentHeatingCoolingState);
 
@@ -116,6 +113,7 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
     }
 
+    // --- BLE 핵심 로직 ---
     async initNodeBle() {
         try {
             const { bluetooth } = NodeBle.createBluetooth();
@@ -130,63 +128,47 @@ class HeatingMatAccessory {
         while (true) {
             if (!this.isConnected) {
                 try {
-                    this.log.debug(`[BLE] 기기 검색 중...`);
                     this.cleanup();
-
                     await this.adapter.startDiscovery();
                     await sleep(4000);
                     await this.adapter.stopDiscovery();
                     await sleep(2000);
 
                     const devices = await this.adapter.devices();
-                    let foundAddr = null;
-
                     for (const addr of devices) {
                         if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
-                            foundAddr = addr;
+                            this.device = await this.adapter.getDevice(addr);
+                            await sleep(1500);
+                            await this.connectDevice();
                             break;
                         }
                     }
-
-                    if (foundAddr) {
-                        this.log.info(`[BLE] 매트 발견 (${foundAddr}), 연결 시도...`);
-                        this.device = await this.adapter.getDevice(foundAddr);
-                        await sleep(1500);
-
-                        await Promise.race([
-                            this.connectDevice(),
-                            sleep(25000).then(() => { throw new Error('연결 프로세스 전체 타임아웃'); })
-                        ]);
-                    }
                 } catch (e) {
-                    this.log.error(`[BLE] 루프 에러 또는 타임아웃: ${e.message}`);
-                    this.isConnected = false;
-                    this.cleanup();
-                    try { await this.adapter.stopDiscovery(); } catch(i) {}
+                    this.log.debug(`[BLE] 스캔 루프 오류: ${e.message}`);
+                    try { await this.adapter.stopDiscovery(); } catch (i) {}
                 }
             }
-            await sleep(this.isConnected ? 5000 : 15000);
+            await sleep(this.isConnected ? 10000 : 15000);
         }
     }
 
     async connectDevice() {
         if (this.isConnected) return;
         try {
-            if (this.device) {
-                this.device.removeAllListeners('disconnect');
-            }
+            if (this.device) this.device.removeAllListeners('disconnect');
 
-            const connectPromise = this.device.connect();
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('연결 타임아웃')), CONFIG.CONNECT_TIMEOUT)
-            );
+            this.log.info(`[BLE] 매트 연결 시도...`);
+            await Promise.race([
+                this.device.connect(),
+                sleep(CONFIG.CONNECT_TIMEOUT).then(() => { throw new Error('연결 타임아웃'); })
+            ]);
 
-            await Promise.race([connectPromise, timeoutPromise]);
+            await sleep(1000);
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
 
             this.device.once('disconnect', () => {
-                this.log.warn(`[BLE] 연결 끊김 감지! 재연결을 시도합니다.`);
+                this.log.warn(`[BLE] 연결 끊김 감지. 곧 재연결 시도.`);
                 this.isConnected = false;
                 this.cleanup();
             });
@@ -196,6 +178,38 @@ class HeatingMatAccessory {
             this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
             this.cleanup();
+        }
+    }
+
+    async discoverCharacteristics() {
+        try {
+            const gatt = await this.device.gatt();
+            await sleep(CONFIG.GATT_WAIT_MS);
+
+            const service = await gatt.getPrimaryService(this.serviceUuid);
+
+            // 초기화 패킷 전송 (연결 유지 골든타임 확보)
+            if (this.charSetUuid && this.initPacketHex) {
+                this.setChar = await service.getCharacteristic(this.charSetUuid);
+                await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
+                this.log.info(`[BLE] 초기화 패킷 전송 완료`);
+                await sleep(500);
+            }
+
+            this.tempChar = await service.getCharacteristic(this.charTempUuid);
+            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
+
+            await this.tempChar.startNotifications();
+            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            await sleep(500);
+
+            await this.timeChar.startNotifications();
+            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+
+            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
+        } catch (e) {
+            this.log.error(`[BLE] 탐색 오류: ${e.message}`);
+            this.isConnected = false;
             if (this.device) this.device.disconnect().catch(() => {});
         }
     }
@@ -207,48 +221,13 @@ class HeatingMatAccessory {
         this.setChar = null;
     }
 
-    async discoverCharacteristics() {
-        try {
-            const gatt = await this.device.gatt();
-            await sleep(CONFIG.GATT_WAIT_MS);
-
-            const service = await gatt.getPrimaryService(this.serviceUuid);
-
-            if (this.charSetUuid && this.initPacketHex) {
-                this.setChar = await service.getCharacteristic(this.charSetUuid);
-                const packet = Buffer.from(this.initPacketHex, 'hex');
-                await this.setChar.writeValue(packet, { type: 'command' });
-                this.log.info(`[BLE] 초기화 패킷 전송 완료`);
-            }
-
-            this.tempChar = await service.getCharacteristic(this.charTempUuid);
-            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
-
-            await Promise.all([
-                this.tempChar.startNotifications().then(() => {
-                    this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-                }),
-                this.timeChar.startNotifications().then(() => {
-                    this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
-                })
-            ]);
-
-            this.log.info(`[BLE] 모든 서비스 활성화 완료`);
-        } catch (e) {
-            this.log.error(`[BLE] 특성 탐색 오류: ${e.message}`);
-            throw e;
-        }
-    }
-
     async writeRaw(characteristic, packet) {
         if (!this.isConnected || !characteristic) return false;
         for (let i = 0; i < CONFIG.RETRY_COUNT; i++) {
             try {
                 await characteristic.writeValue(packet, { type: 'command' });
-                await sleep(CONFIG.WRITE_DELAY_MS);
                 return true;
             } catch (e) {
-                this.log.warn(`[BLE] 쓰기 시도 ${i+1} 실패: ${e.message}`);
                 await sleep(1000);
             }
         }
@@ -257,28 +236,14 @@ class HeatingMatAccessory {
 
     startHealthCheck() {
         if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
-
         this.healthCheckInterval = setInterval(async () => {
             if (this.isConnected && this.tempChar) {
                 try {
                     await this.tempChar.readValue();
-                    this.log.debug(`[Health] 연결 상태 양호`);
                 } catch (e) {
-                    this.log.error(`[Health] 연결 응답 없음 (${e.message}). 재연결 프로세스 시작.`);
+                    this.log.error(`[Health] 응답 없음. 재연결 시도.`);
                     this.isConnected = false;
-
-                    try {
-                        if (this.device) {
-                            await this.device.disconnect();
-                        }
-                    } catch (disconnectError) {
-                        this.log.debug(`[Health] 강제 연결 해제 중 오류(이미 끊겼을 수 있음): ${disconnectError.message}`);
-                    }
-
-                    this.device = null;
-                    this.tempChar = null;
-                    this.timeChar = null;
-                    this.setChar = null;
+                    if (this.device) this.device.disconnect().catch(() => {});
                 }
             }
         }, CONFIG.HEALTH_CHECK_INTERVAL);
@@ -291,7 +256,7 @@ class HeatingMatAccessory {
         if (type === 'temp') {
             const t = CONFIG.LEVEL_TEMP_MAP[val];
             if (t !== undefined && this.currentState.targetTemp !== t) {
-                this.log.info(`[BLE] 수동 조작 감지 - 온도: ${t}°C (레벨 ${val})`);
+                this.log.info(`[BLE] 수동 조작 - 온도: ${t}°C`);
                 this.currentState.targetTemp = t;
                 this.currentState.currentTemp = t;
                 this.currentState.currentHeatingCoolingState = (val > 0) ? 1 : 0;
@@ -300,7 +265,7 @@ class HeatingMatAccessory {
             }
         } else if (type === 'timer') {
             if (this.currentState.timerHours !== val) {
-                this.log.info(`[BLE] 수동 조작 감지 - 타이머: ${val}시간`);
+                this.log.info(`[BLE] 수동 조작 - 타이머: ${val}시간`);
                 this.currentState.timerHours = val;
                 this.currentState.timerOn = (val > 0);
                 this.updateHomeKit();
@@ -313,7 +278,6 @@ class HeatingMatAccessory {
         this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
         this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState);
         this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
-
         this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
         this.timerService.updateCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
     }
@@ -323,21 +287,18 @@ class HeatingMatAccessory {
         const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
         if (success) {
             this.currentState.currentHeatingCoolingState = value;
-            this.log.info(`[HomeKit] 전원 ${value === 0 ? 'OFF' : 'ON'} 완료`);
+            this.log.info(`[HomeKit] 전원 ${value === 0 ? 'OFF' : 'ON'}`);
+            this.updateHomeKit();
         }
     }
 
     async handleSetTargetTemperature(v) {
         this.currentState.targetTemp = v;
         if (this.setTempTimeout) clearTimeout(this.setTempTimeout);
-
         this.setTempTimeout = setTimeout(async () => {
             const level = CONFIG.TEMP_LEVEL_MAP[v] || 0;
             const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
-            if (success) {
-                if (level > 0) this.currentState.lastHeatTemp = v;
-                this.log.info(`[HomeKit] 온도 변경: ${v}°C (레벨 ${level})`);
-            }
+            if (success && level > 0) this.currentState.lastHeatTemp = v;
         }, 500);
     }
 
@@ -354,7 +315,6 @@ class HeatingMatAccessory {
             this.currentState.timerHours = h;
             this.currentState.timerOn = h > 0;
             this.updateHomeKit();
-            this.log.info(`[HomeKit] 타이머 설정: ${h}시간`);
         }
     }
 
