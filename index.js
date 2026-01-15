@@ -1,5 +1,6 @@
 const NodeBle = require('node-ble');
 const { promisify } = require('util');
+const { exec } = require('child_process');
 const sleep = promisify(setTimeout);
 
 const CONFIG = {
@@ -38,6 +39,7 @@ class HeatingMatAccessory {
         this.adapter = null;
         this.isConnected = false;
         this.setTempTimeout = null;
+        this.abortCount = 0;
 
         this.currentState = {
             targetTemp: CONFIG.DEFAULT_HEAT_TEMP,
@@ -112,28 +114,59 @@ class HeatingMatAccessory {
     }
 
     async connectDevice() {
+        const timeout = (ms) => new Error(`CONNECTION_TIMEOUT_${ms}`);
+
         try {
             this.log.info(`[BLE] 매트 접속 시도...`);
-            this.stopPingLoop();
 
-            await this.device.connect();
+            await Promise.race([
+                this.device.connect(),
+                new Promise((_, reject) => setTimeout(() => reject(timeout(5000)), 5000))
+            ]);
+
             this.isConnected = true;
+            this.abortCount = 0;
             this.log.info(`[BLE] 연결 성공.`);
 
             this.device.removeAllListeners('disconnect');
             this.device.once('disconnect', () => {
                 this.log.warn(`[BLE] 연결 유실 감지.`);
-                this.isConnected = false;
-                this.stopPingLoop();
-                this.device = null;
+                this.cleanup();
             });
 
             await this.discoverCharacteristics();
         } catch (e) {
-            this.log.error(`[BLE] 연결 실패: ${e.message}`);
-            this.isConnected = false;
+            if (e.message.includes('le-connection-abort-by-local')) {
+                this.abortCount++;
+                this.log.warn(`[BLE] 로컬 중단 에러 발생 (${this.abortCount}/3)`);
+
+                if (this.abortCount >= 3) {
+                    this.resetBluetoothAdapter();
+                    this.abortCount = 0;
+                }
+            }
+            this.cleanup();
+        }
+    }
+
+    cleanup() {
+        this.isConnected = false;
+        this.stopPingLoop();
+        if (this.device) {
+            this.device.disconnect().catch(() => {});
             this.device = null;
         }
+    }
+
+    resetBluetoothAdapter() {
+        this.log.warn(`[BLE] 블루투스 스택이 꼬였습니다. 하드웨어 리셋을 시도합니다...`);
+        exec('sudo hciconfig hci0 down && sleep 1 && sudo hciconfig hci0 up', (error) => {
+            if (error) {
+                this.log.error(`[BLE] 어댑터 리셋 실패: ${error.message}. sudo 권한을 확인하세요.`);
+            } else {
+                this.log.info(`[BLE] 블루투스 어댑터(hci0)가 재시작되었습니다.`);
+            }
+        });
     }
 
     async discoverCharacteristics() {
