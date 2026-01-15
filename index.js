@@ -228,7 +228,7 @@ class HeatingMatAccessory {
             }
             try {
                 await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
-                this.log.debug(`[BLE] Ping (0x12) 발송`);
+                //this.log.debug(`[BLE] Ping (0x12) 발송`);
             } catch (e) {
                 this.log.warn(`[BLE] Ping 전송 실패, 연결 확인 필요.`);
             }
