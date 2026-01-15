@@ -8,7 +8,7 @@ const CONFIG = {
     RECONNECT_DELAY: 5000,
     CONNECT_TIMEOUT: 30000,
     GATT_WAIT_MS: 2500,
-    HEALTH_CHECK_INTERVAL: 30000,
+    HEALTH_CHECK_INTERVAL: 10000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
@@ -69,25 +69,18 @@ class HeatingMatAccessory {
     parsePacket(buffer, characteristicType) {
         if (!buffer || buffer.length < 4) return this.currentState[characteristicType];
 
-        const header1 = buffer.readUInt8(0);
-        const header2 = buffer.readUInt8(1);
         const data = buffer.readUInt8(2);
         const checksum = buffer.readUInt8(3);
 
-        const isValid = (header1 === 0xFF) && (header2 === 0x00) && ((data + checksum) === 0xFF);
-
-        if (isValid) {
+        if (buffer[0] === 0xFF && (data + checksum === 255)) {
             if (data <= 15) {
-                this.log.debug(`[BLE] 유효한 상태 데이터 수신: ${data}`);
                 return data;
             } else {
-                this.log.debug(`[BLE] 시스템/상태 패킷 수신 (${data}), 값 업데이트 건너뜀`);
+                this.log.debug(`[BLE] 시스템 패킷 무시 (Data: ${data})`);
                 return this.currentState[characteristicType];
             }
-        } else {
-            this.log.error(`[BLE] 패킷 검증 실패: ${buffer.toString('hex')}`);
-            return this.currentState[characteristicType];
         }
+        return this.currentState[characteristicType];
     }
 
     initServices() {
@@ -248,17 +241,19 @@ class HeatingMatAccessory {
 
         if (type === 'temp') {
             const t = CONFIG.LEVEL_TEMP_MAP[val];
-            if (t !== undefined) {
+            if (t !== undefined && t !== this.currentState.targetTemp) {
                 this.currentState.targetTemp = t;
                 this.currentState.currentTemp = t;
                 this.currentState.currentHeatingCoolingState = val > 0 ? 1 : 0;
-                if (val > 0) this.currentState.lastHeatTemp = t;
+                this.updateHomeKit();
             }
         } else {
-            this.currentState.timerHours = val;
-            this.currentState.timerOn = val > 0;
+            if (val !== this.currentState.timerHours) {
+                this.currentState.timerHours = val;
+                this.currentState.timerOn = val > 0;
+                this.updateHomeKit();
+            }
         }
-        this.updateHomeKit();
     }
 
     updateHomeKit() {
