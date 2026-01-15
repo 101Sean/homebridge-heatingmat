@@ -114,6 +114,7 @@ class HeatingMatAccessory {
             this.isConnected = true;
             this.log.info(`[BLE] 연결 성공.`);
 
+            await sleep(1000);
             this.device.once('disconnect', () => {
                 this.log.warn(`[BLE] 연결 유실.`);
                 this.isConnected = false;
@@ -123,6 +124,13 @@ class HeatingMatAccessory {
         } catch (e) {
             this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
+
+            try {
+                if (this.device) {
+                    await this.device.disconnect();
+                    this.log.info(`[BLE] 실패 후 세션 정리 완료.`);
+                }
+            } catch (e) {}
         }
     }
 
