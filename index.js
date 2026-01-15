@@ -185,15 +185,28 @@ class HeatingMatAccessory {
             this.device.on('disconnect', () => {
                 this.log.warn(`[BLE] 연결 끊김 감지! 재연결을 시도합니다.`);
                 this.isConnected = false;
-                this.device = null;
+                this.cleanup();
             });
 
-            await this.discoverCharacteristics();
+            try {
+                await this.discoverCharacteristics();
+            } catch (err) {
+                this.log.error(`[BLE] 특성 탐색 중 연결 유실: ${err.message}`);
+                this.isConnected = false;
+                this.cleanup();
+            }
         } catch (e) {
             this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
             this.device = null;
         }
+    }
+
+    cleanup() {
+        this.device = null;
+        this.tempChar = null;
+        this.timeChar = null;
+        this.setChar = null;
     }
 
     async discoverCharacteristics() {
@@ -212,12 +225,12 @@ class HeatingMatAccessory {
                 await sleep(1000);
             }
 
-            await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            await this.tempChar.startNotifications();
             await sleep(500);
 
-            await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+            await this.timeChar.startNotifications();
 
             this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
         } catch (e) {
