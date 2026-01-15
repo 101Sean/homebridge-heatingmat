@@ -8,7 +8,7 @@ const CONFIG = {
     RECONNECT_DELAY: 10000,
     CONNECT_TIMEOUT: 20000,
     GATT_WAIT_MS: 500,
-    HEALTH_CHECK_INTERVAL: 15000,
+    PING_INTERVAL: 20000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
@@ -37,7 +37,6 @@ class HeatingMatAccessory {
         this.device = null;
         this.adapter = null;
         this.isConnected = false;
-        this.healthCheckInterval = null;
         this.setTempTimeout = null;
 
         this.currentState = {
@@ -140,23 +139,24 @@ class HeatingMatAccessory {
             await sleep(CONFIG.GATT_WAIT_MS);
             const service = await gatt.getPrimaryService(this.serviceUuid);
 
-            // 초기화 패킷
-            if (this.charSetUuid && this.initPacketHex) {
-                this.setChar = await service.getCharacteristic(this.charSetUuid);
-                const initPacket = Buffer.from(this.initPacketHex, 'hex');
-                const success = await this.writeRaw(this.setChar, initPacket);
-                if (success) this.log.info(`[BLE] 초기화 패킷(활성화) 전송 완료.`);
-            }
-
+            this.setChar = await service.getCharacteristic(this.charSetUuid)
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
             this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
+            await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
+            this.log.info(`[BLE] 1단계: 인증 패킷 전송`);
+            await sleep(200);
+
+            await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
+            this.log.info(`[BLE] 2단계: 상태 요청(0x12) 전송`);
+
             await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-            await sleep(300);
-
+            await sleep(200);
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+
+            this.startPingLoop();
 
             this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
         } catch (e) {
@@ -164,6 +164,23 @@ class HeatingMatAccessory {
             this.isConnected = false;
             if (this.device) await this.device.disconnect().catch(() => {});
         }
+    }
+
+    startPingLoop() {
+        this.stopPingLoop();
+        this.pingInterval = setInterval(async () => {
+            if (!this.isConnected || !this.tempChar) return;
+            try {
+                await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
+                this.log.debug(`[BLE] Ping (0x12) 발송`);
+            } catch (e) {
+                this.log.warn(`[BLE] Ping 실패: ${e.message}`);
+            }
+        }, CONFIG.PING_INTERVAL);
+    }
+
+    stopPingLoop() {
+        if (this.pingInterval) clearInterval(this.pingInterval);
     }
 
     async writeRaw(characteristic, packet) {
