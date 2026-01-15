@@ -7,8 +7,8 @@ const CONFIG = {
     RETRY_COUNT: 3,
     RECONNECT_DELAY: 5000,
     CONNECT_TIMEOUT: 30000,
-    GATT_WAIT_MS: 2500,
-    HEALTH_CHECK_INTERVAL: 10000,
+    GATT_WAIT_MS: 1500,
+    HEALTH_CHECK_INTERVAL: 30000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
@@ -130,31 +130,46 @@ class HeatingMatAccessory {
         while (true) {
             if (!this.isConnected) {
                 try {
+                    this.log.debug(`[BLE] 기기 검색 중...`);
+                    this.device = null;
+
                     await this.adapter.startDiscovery();
                     await sleep(3000);
                     await this.adapter.stopDiscovery();
 
                     const devices = await this.adapter.devices();
+                    let found = false;
+
                     for (const addr of devices) {
                         if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
+                            this.log.info(`[BLE] 매트 발견 (${addr}), 연결을 시도합니다.`);
                             this.device = await this.adapter.getDevice(addr);
-                            await sleep(2000);
-                            await this.connectDevice();
+                            found = true;
                             break;
                         }
                     }
+
+                    if (found) {
+                        await sleep(1000);
+                        await this.connectDevice();
+                    } else {
+                        this.log.debug(`[BLE] 주변에 매트가 없습니다. 10초 후 다시 스캔합니다.`);
+                    }
                 } catch (e) {
-                    this.log.debug(`[BLE] 스캔 루프 오류: ${e.message}`);
+                    this.log.error(`[BLE] 스캔 루프 에러: ${e.message}`);
+                    try { await this.adapter.stopDiscovery(); } catch (i) {}
                 }
             }
-            await sleep(10000);
+            await sleep(this.isConnected ? 5000 : 10000);
         }
     }
 
     async connectDevice() {
         if (this.isConnected) return;
         try {
-            this.log.info(`[BLE] 매트 연결 시도...`);
+            if (this.device) {
+                this.device.removeAllListeners('disconnect');
+            }
 
             const connectPromise = this.device.connect();
             const timeoutPromise = new Promise((_, reject) =>
@@ -168,14 +183,16 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] 매트 연결 성공.`);
 
             this.device.on('disconnect', () => {
-                this.log.warn(`[BLE] 연결 끊김 감지.`);
+                this.log.warn(`[BLE] 연결 끊김 감지! 재연결을 시도합니다.`);
                 this.isConnected = false;
+                this.device = null;
             });
 
             await this.discoverCharacteristics();
         } catch (e) {
             this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
+            this.device = null;
         }
     }
 
@@ -225,13 +242,29 @@ class HeatingMatAccessory {
     }
 
     startHealthCheck() {
+        if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+
         this.healthCheckInterval = setInterval(async () => {
             if (this.isConnected && this.tempChar) {
                 try {
                     await this.tempChar.readValue();
+                    this.log.debug(`[Health] 연결 상태 양호`);
                 } catch (e) {
-                    this.log.error(`[Health] 연결 응답 없음. 재연결 필요.`);
+                    this.log.error(`[Health] 연결 응답 없음 (${e.message}). 재연결 프로세스 시작.`);
                     this.isConnected = false;
+
+                    try {
+                        if (this.device) {
+                            await this.device.disconnect();
+                        }
+                    } catch (disconnectError) {
+                        this.log.debug(`[Health] 강제 연결 해제 중 오류(이미 끊겼을 수 있음): ${disconnectError.message}`);
+                    }
+
+                    this.device = null;
+                    this.tempChar = null;
+                    this.timeChar = null;
+                    this.setChar = null;
                 }
             }
         }, CONFIG.HEALTH_CHECK_INTERVAL);
