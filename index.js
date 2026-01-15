@@ -6,8 +6,8 @@ const CONFIG = {
     WRITE_DELAY_MS: 300,
     RETRY_COUNT: 3,
     RECONNECT_DELAY: 5000,
-    CONNECT_TIMEOUT: 30000,
-    GATT_WAIT_MS: 1500,
+    CONNECT_TIMEOUT: 15000,
+    GATT_WAIT_MS: 500,
     HEALTH_CHECK_INTERVAL: 30000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
@@ -182,28 +182,21 @@ class HeatingMatAccessory {
             );
 
             await Promise.race([connectPromise, timeoutPromise]);
-            await sleep(1000);
-
             this.isConnected = true;
             this.log.info(`[BLE] 매트 연결 성공.`);
 
-            this.device.on('disconnect', () => {
+            this.device.once('disconnect', () => {
                 this.log.warn(`[BLE] 연결 끊김 감지! 재연결을 시도합니다.`);
                 this.isConnected = false;
                 this.cleanup();
             });
 
-            try {
-                await this.discoverCharacteristics();
-            } catch (err) {
-                this.log.error(`[BLE] 특성 탐색 중 연결 유실: ${err.message}`);
-                this.isConnected = false;
-                this.cleanup();
-            }
+            await this.discoverCharacteristics();
         } catch (e) {
             this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
-            this.device = null;
+            this.cleanup();
+            if (this.device) this.device.disconnect().catch(() => {});
         }
     }
 
@@ -220,28 +213,30 @@ class HeatingMatAccessory {
             await sleep(CONFIG.GATT_WAIT_MS);
 
             const service = await gatt.getPrimaryService(this.serviceUuid);
-            this.tempChar = await service.getCharacteristic(this.charTempUuid);
-            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
-
-            await this.tempChar.readValue().catch(() => {});
 
             if (this.charSetUuid && this.initPacketHex) {
                 this.setChar = await service.getCharacteristic(this.charSetUuid);
-                const success = await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
-                if (success) this.log.info(`[BLE] 초기화 패킷 전송 완료`);
-                await sleep(1000);
+                const packet = Buffer.from(this.initPacketHex, 'hex');
+                await this.setChar.writeValue(packet, { type: 'command' });
+                this.log.info(`[BLE] 초기화 패킷 전송 완료`);
             }
 
-            await this.tempChar.startNotifications();
-            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            this.tempChar = await service.getCharacteristic(this.charTempUuid);
+            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
-            await sleep(500);
-            await this.timeChar.startNotifications();
-            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+            await Promise.all([
+                this.tempChar.startNotifications().then(() => {
+                    this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+                }),
+                this.timeChar.startNotifications().then(() => {
+                    this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+                })
+            ]);
 
-            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
+            this.log.info(`[BLE] 모든 서비스 활성화 완료`);
         } catch (e) {
-            throw new Error(`GATT 탐색 실패: ${e.message}`);
+            this.log.error(`[BLE] 특성 탐색 오류: ${e.message}`);
+            throw e;
         }
     }
 
