@@ -180,7 +180,7 @@ class HeatingMatAccessory {
             const tempValue = CONFIG.LEVEL_TEMP_MAP[val];
             if (tempValue !== undefined) {
                 if (this.currentState.currentTemp !== tempValue || this.currentState.currentHeatingCoolingState !== (val > 0 ? 1 : 0)) {
-                    this.log.info(`[수동조작 반영] 온도: ${tempValue}°C (Level: ${val})`);
+                    this.log.debug(`[수동] 온도: ${tempValue}°C (Level: ${val})`);
 
                     this.currentState.currentTemp = tempValue;
                     this.currentState.targetTemp = tempValue;
@@ -195,7 +195,7 @@ class HeatingMatAccessory {
             }
         } else if (type === 'timer') {
             if (this.currentState.timerHours !== val) {
-                this.log.info(`[수동조작 반영] 타이머: ${val}시간`);
+                this.log.debug(`[수동] 타이머: ${val}시간`);
 
                 this.currentState.timerHours = val;
                 this.currentState.timerOn = (val > 0);
