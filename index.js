@@ -8,7 +8,7 @@ const CONFIG = {
     RECONNECT_DELAY: 10000,
     CONNECT_TIMEOUT: 20000,
     GATT_WAIT_MS: 500,
-    PING_INTERVAL: 20000,
+    PING_INTERVAL: 15000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
@@ -152,24 +152,34 @@ class HeatingMatAccessory {
 
             this.log.info(`[BLE] 1단계: 인증 패킷 전송`);
             await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
-            await sleep(200);
 
-            this.log.info(`[BLE] 2단계: 상태 요청(0x12) 전송`);
-            await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
-
+            this.log.info(`[BLE] 2단계: 알림 리스너 등록`);
             await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+            await sleep(300);
+
+            this.log.info(`[BLE] 3단계: 상태 요청(0x12) 전송`);
+            await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
 
             this.startPingLoop();
-
-            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
+            this.log.info(`[BLE] 최종 연결 유지 프로세스 시작`);
         } catch (e) {
             this.log.error(`[BLE] 탐색 오류: ${e.message}`);
             this.isConnected = false;
             if (this.device) await this.device.disconnect().catch(() => {});
+        }
+    }
+
+    async setupDescriptor(characteristic) {
+        try {
+            // 표준 CCCD UUID는 00002902-0000-1000-8000-00805f9b34fb 입니다.
+            const descriptor = await characteristic.getDescriptor('00002902-0000-1000-8000-00805f9b34fb');
+            // '01 00'은 알림(Notification) 활성화를 의미합니다.
+            await descriptor.writeValue(Buffer.from([0x01, 0x00]));
+        } catch (e) {
+            this.log.warn(`[BLE] Descriptor 설정 건너뜀 (이미 활성화되었거나 미지원): ${e.message}`);
         }
     }
 
