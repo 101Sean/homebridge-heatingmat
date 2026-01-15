@@ -7,7 +7,7 @@ const CONFIG = {
     RETRY_COUNT: 3,
     RECONNECT_DELAY: 5000,
     CONNECT_TIMEOUT: 30000,
-    GATT_WAIT_MS: 1500,
+    GATT_WAIT_MS: 2500,
     HEALTH_CHECK_INTERVAL: 30000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
@@ -67,22 +67,26 @@ class HeatingMatAccessory {
     }
 
     parsePacket(buffer, characteristicType) {
-        if (!buffer || buffer.length < 4) {
-            return this.currentState[characteristicType] || 0;
-        }
+        if (!buffer || buffer.length < 4) return this.currentState[characteristicType];
 
-        const val1 = buffer.readUInt8(0);
-        const check1 = buffer.readUInt8(1);
-        const val2 = buffer.readUInt8(2);
-        const check2 = buffer.readUInt8(3);
+        const header1 = buffer.readUInt8(0);
+        const header2 = buffer.readUInt8(1);
+        const data = buffer.readUInt8(2);
+        const checksum = buffer.readUInt8(3);
 
-        const isValid = ((val1 + check1) & 0xFF) === 0xFF && val1 === val2;
+        const isValid = (header1 === 0xFF) && (header2 === 0x00) && ((data + checksum) === 0xFF);
 
         if (isValid) {
-            return val1;
+            if (data <= 15) {
+                this.log.debug(`[BLE] 유효한 상태 데이터 수신: ${data}`);
+                return data;
+            } else {
+                this.log.debug(`[BLE] 시스템/상태 패킷 수신 (${data}), 값 업데이트 건너뜀`);
+                return this.currentState[characteristicType];
+            }
         } else {
-            this.log.error(`[BLE] 체크섬 오류: ${buffer.toString('hex')}`);
-            return this.currentState[characteristicType] || 0;
+            this.log.error(`[BLE] 패킷 검증 실패: ${buffer.toString('hex')}`);
+            return this.currentState[characteristicType];
         }
     }
 
@@ -139,6 +143,7 @@ class HeatingMatAccessory {
                     for (const addr of devices) {
                         if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
                             this.device = await this.adapter.getDevice(addr);
+                            await sleep(2000);
                             await this.connectDevice();
                             break;
                         }
@@ -240,8 +245,6 @@ class HeatingMatAccessory {
     handleUpdate(data, type) {
         const stateKey = (type === 'temp') ? 'targetTemp' : 'timerHours';
         const val = this.parsePacket(data, stateKey);
-
-        if (val === 255) return;
 
         if (type === 'temp') {
             const t = CONFIG.LEVEL_TEMP_MAP[val];
