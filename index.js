@@ -138,26 +138,28 @@ class HeatingMatAccessory {
                     await this.adapter.stopDiscovery();
 
                     const devices = await this.adapter.devices();
-                    let found = false;
+                    let foundAddr = null;
 
                     for (const addr of devices) {
                         if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
-                            this.log.info(`[BLE] 매트 발견 (${addr}), 연결을 시도합니다.`);
-                            this.device = await this.adapter.getDevice(addr);
-                            found = true;
+                            foundAddr = addr;
                             break;
                         }
                     }
 
-                    if (found) {
-                        await sleep(1000);
-                        await this.connectDevice();
-                    } else {
-                        this.log.debug(`[BLE] 주변에 매트가 없습니다. 10초 후 다시 스캔합니다.`);
+                    if (foundAddr) {
+                        this.log.info(`[BLE] 매트 발견 (${foundAddr}), 연결 시도...`);
+                        this.device = await this.adapter.getDevice(foundAddr);
+
+                        await Promise.race([
+                            this.connectDevice(),
+                            sleep(30000).then(() => { throw new Error('연결 프로세스 전체 타임아웃'); })
+                        ]);
                     }
                 } catch (e) {
-                    this.log.error(`[BLE] 스캔 루프 에러: ${e.message}`);
-                    try { await this.adapter.stopDiscovery(); } catch (i) {}
+                    this.log.error(`[BLE] 루프 에러 또는 타임아웃: ${e.message}`);
+                    this.isConnected = false;
+                    this.cleanup();
                 }
             }
             await sleep(this.isConnected ? 5000 : 10000);
@@ -218,6 +220,8 @@ class HeatingMatAccessory {
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
             this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
+            await this.tempChar.readValue().catch(() => {});
+
             if (this.charSetUuid && this.initPacketHex) {
                 this.setChar = await service.getCharacteristic(this.charSetUuid);
                 const success = await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
@@ -225,17 +229,16 @@ class HeatingMatAccessory {
                 await sleep(1000);
             }
 
-            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
             await this.tempChar.startNotifications();
-            await sleep(500);
+            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
 
-            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+            await sleep(500);
             await this.timeChar.startNotifications();
+            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
 
             this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
         } catch (e) {
-            this.log.error(`[BLE] 탐색 중 오류: ${e.message}`);
-            this.isConnected = false;
+            throw new Error(`GATT 탐색 실패: ${e.message}`);
         }
     }
 
