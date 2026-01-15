@@ -121,8 +121,6 @@ class HeatingMatAccessory {
     }
 
     async connectDevice() {
-        const timeout = (ms) => new Error(`CONNECTION_TIMEOUT_${ms}`);
-
         try {
             this.log.info(`[BLE] 매트 접속 시도...`);
 
@@ -185,13 +183,16 @@ class HeatingMatAccessory {
 
             this.log.info(`[BLE] 1단계: 인증 패킷 전송`);
             await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
+            await sleep(1000);
 
             this.log.info(`[BLE] 2단계: 알림 리스너 등록`);
             await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            await sleep(500);
+
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
-            await sleep(300);
+            await sleep(1000);
 
             this.log.info(`[BLE] 3단계: 상태 요청(0x12) 전송`);
             await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
