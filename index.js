@@ -8,7 +8,7 @@ const CONFIG = {
     RECONNECT_DELAY: 10000,
     CONNECT_TIMEOUT: 20000,
     GATT_WAIT_MS: 2000,
-    HEALTH_CHECK_INTERVAL: 30000,
+    HEALTH_CHECK_INTERVAL: 15000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
@@ -117,6 +117,7 @@ class HeatingMatAccessory {
             this.device.once('disconnect', () => {
                 this.log.warn(`[BLE] 연결 유실.`);
                 this.isConnected = false;
+                this.stopHealthCheck();
             });
 
             await this.discoverCharacteristics();
@@ -150,10 +151,13 @@ class HeatingMatAccessory {
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
 
+            this.startHealthCheck();
+
             this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
         } catch (e) {
             this.log.error(`[BLE] 탐색 오류: ${e.message}`);
             this.isConnected = false;
+            if (this.device) await this.device.disconnect().catch(() => {});
         }
     }
 
@@ -281,6 +285,27 @@ class HeatingMatAccessory {
             this.currentState.timerHours = h;
             this.currentState.timerOn = h > 0;
             this.updateHomeKit();
+        }
+    }
+
+    startHealthCheck() {
+        this.stopHealthCheck();
+        this.healthCheckInterval = setInterval(async () => {
+            if (!this.isConnected || !this.tempChar) return;
+
+            try {
+                await this.tempChar.readValue();
+                this.log.debug(`[BLE] Keep-alive 체크 완료.`);
+            } catch (e) {
+                this.log.warn(`[BLE] Keep-alive 응답 없음: ${e.message}`);
+            }
+        }, CONFIG.HEALTH_CHECK_INTERVAL);
+    }
+
+    stopHealthCheck() {
+        if (this.healthCheckInterval) {
+            clearInterval(this.healthCheckInterval);
+            this.healthCheckInterval = null;
         }
     }
 
