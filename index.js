@@ -238,30 +238,24 @@ class HeatingMatAccessory {
     }
 
     handleUpdate(data, type) {
-        const stateKey = (type === 'temp') ? 'targetTemp' : 'timerHours';
-        const val = this.parsePacket(data, stateKey);
+        const val = this.parsePacket(data, type);
         if (val === null) return;
 
         if (type === 'temp') {
             const t = CONFIG.LEVEL_TEMP_MAP[val];
-            if (t !== undefined) {
-                if (this.currentState.targetTemp !== t) {
-                    this.log.info(`[BLE] 수동 조작 감지 - 온도: ${t}°C (레벨 ${val})`);
-                    this.currentState.targetTemp = t;
-                    this.currentState.currentTemp = t;
-                    this.currentState.currentHeatingCoolingState = (val > 0) ? 1 : 0;
-
-                    if (val > 0) this.currentState.lastHeatTemp = t;
-
-                    this.updateHomeKit();
-                }
+            if (t !== undefined && this.currentState.targetTemp !== t) {
+                this.log.info(`[BLE] 수동 조작 감지 - 온도: ${t}°C (레벨 ${val})`);
+                this.currentState.targetTemp = t;
+                this.currentState.currentTemp = t;
+                this.currentState.currentHeatingCoolingState = (val > 0) ? 1 : 0;
+                if (val > 0) this.currentState.lastHeatTemp = t;
+                this.updateHomeKit();
             }
         } else if (type === 'timer') {
             if (this.currentState.timerHours !== val) {
                 this.log.info(`[BLE] 수동 조작 감지 - 타이머: ${val}시간`);
                 this.currentState.timerHours = val;
                 this.currentState.timerOn = (val > 0);
-
                 this.updateHomeKit();
             }
         }
