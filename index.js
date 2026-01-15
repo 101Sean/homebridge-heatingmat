@@ -5,17 +5,17 @@ const sleep = promisify(setTimeout);
 const CONFIG = {
     WRITE_DELAY_MS: 300,
     RETRY_COUNT: 3,
-    RECONNECT_DELAY: 15000,
+    RECONNECT_DELAY: 10000,
     CONNECT_TIMEOUT: 20000,
-    GATT_WAIT_MS: 1000,
+    GATT_WAIT_MS: 2000,
     HEALTH_CHECK_INTERVAL: 30000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
     MIN_TEMP: 36,
     MAX_TEMP: 42,
     DEFAULT_HEAT_TEMP: 38,
-    MAX_TIMER_HOURS: 12,
-    BRIGHTNESS_PER_HOUR: 100 / 12,
+    MAX_TIMER_HOURS: 15,
+    BRIGHTNESS_PER_HOUR: 100 / 15
 };
 
 class HeatingMatAccessory {
@@ -51,10 +51,8 @@ class HeatingMatAccessory {
 
         this.initServices();
         this.initNodeBle();
-        this.startHealthCheck();
     }
 
-    // --- 데이터 패킷 처리 ---
     createControlPacket(value) {
         const dataByte = value & 0xFF;
         const checkSum = (0xFF - dataByte) & 0xFF;
@@ -68,21 +66,155 @@ class HeatingMatAccessory {
 
     parsePacket(buffer, type) {
         if (!buffer || buffer.length < 4) return null;
-
         const b2 = buffer.readUInt8(2);
         const b3 = buffer.readUInt8(3);
 
         if (((b2 + b3) & 0xFF) === 0xFF) {
-            const level = (0xFF - b2) & 0xFF;
-            this.log.debug(`[BLE] 데이터 수신 - Type: ${type}, Level: ${level}`);
-            return level;
-        } else {
-            this.log.warn(`[BLE] 체크섬 불일치 데이터 수신`);
+            return (0xFF - b2) & 0xFF;
         }
         return null;
     }
 
-    // --- HomeKit 서비스 설정 ---
+    async initNodeBle() {
+        try {
+            const { bluetooth } = NodeBle.createBluetooth();
+            this.adapter = await bluetooth.defaultAdapter();
+            this.startScanningLoop();
+        } catch (e) {
+            this.log.error(`[BLE] 초기화 실패: ${e.message}`);
+        }
+    }
+
+    async startScanningLoop() {
+        while (true) {
+            if (!this.isConnected) {
+                try {
+                    await this.adapter.startDiscovery();
+                    await sleep(4000);
+                    await this.adapter.stopDiscovery();
+
+                    const devices = await this.adapter.devices();
+                    for (const addr of devices) {
+                        if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
+                            this.device = await this.adapter.getDevice(addr);
+                            await this.connectDevice();
+                            break;
+                        }
+                    }
+                } catch (e) {}
+            }
+            await sleep(CONFIG.RECONNECT_DELAY);
+        }
+    }
+
+    async connectDevice() {
+        try {
+            this.log.info(`[BLE] 매트 접속 시도...`);
+            await this.device.connect();
+            this.isConnected = true;
+            this.log.info(`[BLE] 연결 성공.`);
+
+            this.device.once('disconnect', () => {
+                this.log.warn(`[BLE] 연결 유실.`);
+                this.isConnected = false;
+            });
+
+            await this.discoverCharacteristics();
+        } catch (e) {
+            this.log.error(`[BLE] 연결 실패: ${e.message}`);
+            this.isConnected = false;
+        }
+    }
+
+    async discoverCharacteristics() {
+        try {
+            const gatt = await this.device.gatt();
+            await sleep(CONFIG.GATT_WAIT_MS);
+            const service = await gatt.getPrimaryService(this.serviceUuid);
+
+            // 초기화 패킷
+            if (this.charSetUuid && this.initPacketHex) {
+                this.setChar = await service.getCharacteristic(this.charSetUuid);
+                const initPacket = Buffer.from(this.initPacketHex, 'hex');
+                const success = await this.writeRaw(this.setChar, initPacket);
+                if (success) this.log.info(`[BLE] 초기화 패킷(활성화) 전송 완료.`);
+            }
+
+            this.tempChar = await service.getCharacteristic(this.charTempUuid);
+            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
+
+            await this.tempChar.startNotifications();
+            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            await sleep(300);
+
+            await this.timeChar.startNotifications();
+            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+
+            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
+        } catch (e) {
+            this.log.error(`[BLE] 탐색 오류: ${e.message}`);
+            this.isConnected = false;
+        }
+    }
+
+    async writeRaw(characteristic, packet) {
+        if (!this.isConnected || !characteristic) return false;
+
+        for (let i = 0; i < CONFIG.RETRY_COUNT; i++) {
+            try {
+                await characteristic.writeValue(packet, { type: 'command' });
+                return true;
+            } catch (e) {
+                this.log.warn(`[BLE] 쓰기 실패 (${i+1}/3), ${CONFIG.WRITE_DELAY_MS}ms 후 재시도...`);
+                await sleep(CONFIG.WRITE_DELAY_MS);
+            }
+        }
+        return false;
+    }
+
+    handleUpdate(data, type) {
+        const val = this.parsePacket(data, type);
+        if (val === null) return;
+
+        if (type === 'temp') {
+            const tempValue = CONFIG.LEVEL_TEMP_MAP[val];
+            if (tempValue !== undefined) {
+                if (this.currentState.currentTemp !== tempValue || this.currentState.currentHeatingCoolingState !== (val > 0 ? 1 : 0)) {
+                    this.log.info(`[수동조작 반영] 온도: ${tempValue}°C (Level: ${val})`);
+
+                    this.currentState.currentTemp = tempValue;
+                    this.currentState.targetTemp = tempValue;
+                    this.currentState.currentHeatingCoolingState = (val > 0) ? 1 : 0;
+                    if (val > 0) this.currentState.lastHeatTemp = tempValue;
+
+                    this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, tempValue);
+                    this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, tempValue);
+                    this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
+                    this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState);
+                }
+            }
+        } else if (type === 'timer') {
+            if (this.currentState.timerHours !== val) {
+                this.log.info(`[수동조작 반영] 타이머: ${val}시간`);
+
+                this.currentState.timerHours = val;
+                this.currentState.timerOn = (val > 0);
+
+                this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
+                this.timerService.updateCharacteristic(this.Characteristic.Brightness, val * CONFIG.BRIGHTNESS_PER_HOUR);
+            }
+        }
+    }
+
+    updateHomeKit() {
+        this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, this.currentState.targetTemp);
+        this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
+        this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState);
+        this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
+        this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
+        this.timerService.updateCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
+    }
+
     initServices() {
         this.informationService = new this.Service.AccessoryInformation()
             .setCharacteristic(this.Characteristic.Manufacturer, 'Generic Mat')
@@ -105,7 +237,10 @@ class HeatingMatAccessory {
 
         this.timerService = new this.Service.Lightbulb(this.name + ' 타이머');
         this.timerService.getCharacteristic(this.Characteristic.On)
-            .onSet(this.handleTimerSwitch.bind(this))
+            .onSet(async (v) => {
+                const h = v ? Math.max(1, this.currentState.timerHours) : 0;
+                await this.handleSetTimerHours(h * CONFIG.BRIGHTNESS_PER_HOUR);
+            })
             .onGet(() => this.currentState.timerOn);
 
         this.timerService.getCharacteristic(this.Characteristic.Brightness)
@@ -114,181 +249,11 @@ class HeatingMatAccessory {
             .onGet(() => this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
     }
 
-    // --- BLE 핵심 로직 ---
-    async initNodeBle() {
-        try {
-            const { bluetooth } = NodeBle.createBluetooth();
-            this.adapter = await bluetooth.defaultAdapter();
-            this.startScanningLoop();
-        } catch (e) {
-            this.log.error(`[BLE] 초기화 실패: ${e.message}`);
-        }
-    }
-
-    async startScanningLoop() {
-        while (true) {
-            if (!this.isConnected) {
-                try {
-                    this.cleanup();
-                    await this.adapter.startDiscovery();
-                    await sleep(4000);
-                    await this.adapter.stopDiscovery();
-                    await sleep(2000);
-
-                    const devices = await this.adapter.devices();
-                    for (const addr of devices) {
-                        if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
-                            this.device = await this.adapter.getDevice(addr);
-                            await sleep(1500);
-                            await this.connectDevice();
-                            break;
-                        }
-                    }
-                } catch (e) {
-                    this.log.debug(`[BLE] 스캔 루프 오류: ${e.message}`);
-                    try { await this.adapter.stopDiscovery(); } catch (i) {}
-                }
-            }
-            await sleep(this.isConnected ? 10000 : 15000);
-        }
-    }
-
-    async connectDevice() {
-        if (this.isConnected) return;
-        try {
-            if (this.device) this.device.removeAllListeners('disconnect');
-
-            this.log.info(`[BLE] 매트 연결 시도...`);
-            await Promise.race([
-                this.device.connect(),
-                sleep(CONFIG.CONNECT_TIMEOUT).then(() => { throw new Error('연결 타임아웃'); })
-            ]);
-
-            await sleep(1000);
-            this.isConnected = true;
-            this.log.info(`[BLE] 매트 연결 성공.`);
-
-            this.device.once('disconnect', () => {
-                this.log.warn(`[BLE] 연결 끊김 감지. 곧 재연결 시도.`);
-                this.isConnected = false;
-                this.cleanup();
-            });
-
-            await this.discoverCharacteristics();
-        } catch (e) {
-            this.log.error(`[BLE] 연결 실패: ${e.message}`);
-            this.isConnected = false;
-            this.cleanup();
-        }
-    }
-
-    async discoverCharacteristics() {
-        try {
-            const gatt = await this.device.gatt();
-            await sleep(CONFIG.GATT_WAIT_MS);
-
-            const service = await gatt.getPrimaryService(this.serviceUuid);
-
-            // 초기화 패킷 전송 (연결 유지 골든타임 확보)
-            if (this.charSetUuid && this.initPacketHex) {
-                this.setChar = await service.getCharacteristic(this.charSetUuid);
-                await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
-                this.log.info(`[BLE] 초기화 패킷 전송 완료`);
-                await sleep(500);
-            }
-
-            this.tempChar = await service.getCharacteristic(this.charTempUuid);
-            this.timeChar = await service.getCharacteristic(this.charTimeUuid);
-
-            await this.tempChar.startNotifications();
-            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-            await sleep(500);
-
-            await this.timeChar.startNotifications();
-            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
-
-            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
-        } catch (e) {
-            this.log.error(`[BLE] 탐색 오류: ${e.message}`);
-            this.isConnected = false;
-            if (this.device) this.device.disconnect().catch(() => {});
-        }
-    }
-
-    cleanup() {
-        this.device = null;
-        this.tempChar = null;
-        this.timeChar = null;
-        this.setChar = null;
-    }
-
-    async writeRaw(characteristic, packet) {
-        if (!this.isConnected || !characteristic) return false;
-        for (let i = 0; i < CONFIG.RETRY_COUNT; i++) {
-            try {
-                await characteristic.writeValue(packet, { type: 'command' });
-                return true;
-            } catch (e) {
-                await sleep(1000);
-            }
-        }
-        return false;
-    }
-
-    startHealthCheck() {
-        if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
-        this.healthCheckInterval = setInterval(async () => {
-            if (this.isConnected && this.tempChar) {
-                try {
-                    await this.tempChar.readValue();
-                } catch (e) {
-                    this.log.error(`[Health] 응답 없음. 재연결 시도.`);
-                    this.isConnected = false;
-                    if (this.device) this.device.disconnect().catch(() => {});
-                }
-            }
-        }, CONFIG.HEALTH_CHECK_INTERVAL);
-    }
-
-    handleUpdate(data, type) {
-        const val = this.parsePacket(data, type);
-        if (val === null) return;
-
-        if (type === 'temp') {
-            const t = CONFIG.LEVEL_TEMP_MAP[val];
-            if (t !== undefined && this.currentState.targetTemp !== t) {
-                this.log.info(`[BLE] 수동 조작 - 온도: ${t}°C`);
-                this.currentState.targetTemp = t;
-                this.currentState.currentTemp = t;
-                this.currentState.currentHeatingCoolingState = (val > 0) ? 1 : 0;
-                if (val > 0) this.currentState.lastHeatTemp = t;
-                this.updateHomeKit();
-            }
-        } else if (type === 'timer') {
-            if (this.currentState.timerHours !== val) {
-                this.log.info(`[BLE] 수동 조작 - 타이머: ${val}시간`);
-                this.currentState.timerHours = val;
-                this.currentState.timerOn = (val > 0);
-                this.updateHomeKit();
-            }
-        }
-    }
-
-    updateHomeKit() {
-        this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, this.currentState.targetTemp);
-        this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
-        this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState);
-        this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
-        this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
-        this.timerService.updateCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
-    }
-
     async handleSetTargetHeatingCoolingState(value) {
         const level = value === 0 ? 0 : (CONFIG.TEMP_LEVEL_MAP[this.currentState.lastHeatTemp] || 3);
         const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
         if (success) {
             this.currentState.currentHeatingCoolingState = value;
-            this.log.info(`[HomeKit] 전원 ${value === 0 ? 'OFF' : 'ON'}`);
             this.updateHomeKit();
         }
     }
@@ -301,11 +266,6 @@ class HeatingMatAccessory {
             const success = await this.writeRaw(this.tempChar, this.createControlPacket(level));
             if (success && level > 0) this.currentState.lastHeatTemp = v;
         }, 500);
-    }
-
-    async handleTimerSwitch(v) {
-        const h = v ? Math.max(1, this.currentState.timerHours) : 0;
-        await this.handleSetTimerHours(h * CONFIG.BRIGHTNESS_PER_HOUR);
     }
 
     async handleSetTimerHours(v) {
