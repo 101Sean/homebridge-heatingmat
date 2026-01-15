@@ -88,19 +88,24 @@ class HeatingMatAccessory {
         while (true) {
             if (!this.isConnected) {
                 try {
+                    this.log.debug(`[BLE] 주변 기기 검색 중...`);
                     await this.adapter.startDiscovery();
-                    await sleep(4000);
+                    await sleep(3000);
                     await this.adapter.stopDiscovery();
 
                     const devices = await this.adapter.devices();
                     for (const addr of devices) {
                         if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
                             this.device = await this.adapter.getDevice(addr);
+                            try { await this.device.disconnect(); } catch(e) {}
                             await this.connectDevice();
                             break;
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    this.log.error(`[BLE] 스캔 중 오류: ${e.message}`);
+                    try { await this.adapter.stopDiscovery(); } catch(e) {}
+                }
             }
             await sleep(CONFIG.RECONNECT_DELAY);
         }
@@ -111,7 +116,7 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] 매트 접속 시도...`);
 
             const connectPromise = this.device.connect();
-            const timeoutPromise = sleep(10000).then(() => { throw new Error('Connect Timeout'); });
+            const timeoutPromise = sleep(5000).then(() => { throw new Error('Connect Timeout'); });
 
             await Promise.race([connectPromise, timeoutPromise]);
 
@@ -119,14 +124,15 @@ class HeatingMatAccessory {
             this.log.info(`[BLE] 연결 성공.`);
 
             this.device.once('disconnect', () => {
-                this.log.warn(`[BLE] 연결 유실. 상태를 초기화합니다.`);
+                this.log.warn(`[BLE] 연결 유실. 재시도를 준비합니다.`);
                 this.isConnected = false;
                 this.stopPingLoop();
+                this.device.disconnect().catch(() => {});
             });
 
             await this.discoverCharacteristics();
         } catch (e) {
-            this.log.error(`[BLE] 연결 실패 또는 타임아웃: ${e.message}`);
+            this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
             if (this.device) {
                 await this.device.disconnect().catch(() => {});
