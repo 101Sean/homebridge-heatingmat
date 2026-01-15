@@ -69,18 +69,15 @@ class HeatingMatAccessory {
     parsePacket(buffer, type) {
         if (!buffer || buffer.length < 4) return null;
 
-        this.log.debug(`[Data Debug] Type: ${type}, Hex: ${buffer.toString('hex').toUpperCase()}`);
-
-        const b0 = buffer.readUInt8(0);
         const b2 = buffer.readUInt8(2);
         const b3 = buffer.readUInt8(3);
 
         if (((b2 + b3) & 0xFF) === 0xFF) {
-            const actualValue = (0xFF - b2) & 0xFF;
-            if (type === 'temp' && b0 === 0xFC) return actualValue;
-            if (type === 'timer' && b0 === 0xF7) return actualValue;
+            const level = (0xFF - b2) & 0xFF;
+            this.log.debug(`[BLE] 데이터 수신 - Type: ${type}, Level: ${level}`);
+            return level;
         } else {
-            this.log.warn(`[Data Debug] 체크섬 불일치: b2(${b2}) + b3(${b3}) = ${(b2+b3)}`);
+            this.log.warn(`[BLE] 체크섬 불일치 데이터 수신`);
         }
         return null;
     }
