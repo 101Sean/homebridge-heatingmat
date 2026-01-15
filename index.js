@@ -67,18 +67,20 @@ class HeatingMatAccessory {
     }
 
     parsePacket(buffer, characteristicType) {
-        if (!buffer || buffer.length < 4) return this.currentState[characteristicType];
+        if (!buffer || buffer.length < 4) return null;
 
-        const data = buffer.readUInt8(2);
-        const checksum = buffer.readUInt8(3);
+        const b0 = buffer.readUInt8(0);
+        const b1 = buffer.readUInt8(1);
+        const b2 = buffer.readUInt8(2); // data
+        const b3 = buffer.readUInt8(3); // checksum
 
-        if (buffer[0] === 0xFF && (data + checksum === 255)) {
-            if (data <= 15) {
-                return data;
-            } else {
-                this.log.debug(`[BLE] 시스템 패킷 무시 (Data: ${data})`);
-                return null;
-            }
+        const isHeaderValid = ((b0 + b1) & 0xFF) === 0xFF;
+        const isDataValid = ((b2 + b3) & 0xFF) === 0xFF;
+
+        if (isHeaderValid && isDataValid) {
+            const actualValue = (0xFF - b2) & 0xFF;
+            if (characteristicType === 'temp' && b0 === 0xFC) return actualValue;
+            if (characteristicType === 'timer' && b0 === 0xF7) return actualValue;
         }
         return null;
     }
@@ -186,32 +188,21 @@ class HeatingMatAccessory {
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
             this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
-            await this.tempChar.startNotifications();
-            this.tempChar.on('valuechanged', (data) => {
-                this.log.info(`[BLE] 온도 데이터 수신: ${data.toString('hex')}`);
-                this.handleUpdate(data, 'temp');
-            });
-
-            await sleep(1000);
-            await this.timeChar.startNotifications();
-            this.timeChar.on('valuechanged', (data) => {
-                this.log.info(`[BLE] 타이머 데이터 수신: ${data.toString('hex')}`);
-                this.handleUpdate(data, 'timer');
-            });
-
-            await sleep(500);
-            const tVal = await this.tempChar.readValue().catch(() => null);
-            if (tVal) this.handleUpdate(tVal, 'temp');
-            const iVal = await this.timeChar.readValue().catch(() => null);
-            if (iVal) this.handleUpdate(iVal, 'timer');
-
             if (this.charSetUuid && this.initPacketHex) {
                 this.setChar = await service.getCharacteristic(this.charSetUuid);
-                await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
-                this.log.info(`[BLE] 초기화 패킷 전송 완료`);
+                const success = await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
+                if (success) this.log.info(`[BLE] 초기화 패킷 전송 완료`);
+                await sleep(1000);
             }
 
-            this.log.info(`[BLE] 모든 서비스 준비 완료.`);
+            await this.tempChar.startNotifications();
+            this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
+            await sleep(500);
+
+            await this.timeChar.startNotifications();
+            this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
+
+            this.log.info(`[BLE] 서비스 및 알림 활성화 완료.`);
         } catch (e) {
             this.log.error(`[BLE] 탐색 중 오류: ${e.message}`);
             this.isConnected = false;
@@ -279,7 +270,9 @@ class HeatingMatAccessory {
     updateHomeKit() {
         this.thermostatService.updateCharacteristic(this.Characteristic.TargetTemperature, this.currentState.targetTemp);
         this.thermostatService.updateCharacteristic(this.Characteristic.CurrentTemperature, this.currentState.currentTemp);
+        this.thermostatService.updateCharacteristic(this.Characteristic.TargetHeatingCoolingState, this.currentState.currentHeatingCoolingState);
         this.thermostatService.updateCharacteristic(this.Characteristic.CurrentHeatingCoolingState, this.currentState.currentHeatingCoolingState);
+
         this.timerService.updateCharacteristic(this.Characteristic.On, this.currentState.timerOn);
         this.timerService.updateCharacteristic(this.Characteristic.Brightness, this.currentState.timerHours * CONFIG.BRIGHTNESS_PER_HOUR);
     }
