@@ -88,23 +88,23 @@ class HeatingMatAccessory {
         while (true) {
             if (!this.isConnected) {
                 try {
-                    this.log.debug(`[BLE] 주변 기기 검색 중...`);
+                    this.log.info(`[BLE] 주변 기기 검색 중...`);
+                    try { await this.adapter.stopDiscovery(); } catch(e) {}
+
                     await this.adapter.startDiscovery();
-                    await sleep(3000);
+                    await sleep(4000);
                     await this.adapter.stopDiscovery();
 
                     const devices = await this.adapter.devices();
                     for (const addr of devices) {
                         if (addr.toUpperCase().replace(/:/g, '') === this.macAddress.toUpperCase()) {
                             this.device = await this.adapter.getDevice(addr);
-                            try { await this.device.disconnect(); } catch(e) {}
                             await this.connectDevice();
                             break;
                         }
                     }
                 } catch (e) {
-                    this.log.error(`[BLE] 스캔 중 오류: ${e.message}`);
-                    try { await this.adapter.stopDiscovery(); } catch(e) {}
+                    this.log.error(`[BLE] 스캔 루프 에러: ${e.message}`);
                 }
             }
             await sleep(CONFIG.RECONNECT_DELAY);
@@ -114,29 +114,25 @@ class HeatingMatAccessory {
     async connectDevice() {
         try {
             this.log.info(`[BLE] 매트 접속 시도...`);
+            this.stopPingLoop();
 
-            const connectPromise = this.device.connect();
-            const timeoutPromise = sleep(5000).then(() => { throw new Error('Connect Timeout'); });
-
-            await Promise.race([connectPromise, timeoutPromise]);
-
+            await this.device.connect();
             this.isConnected = true;
             this.log.info(`[BLE] 연결 성공.`);
 
+            this.device.removeAllListeners('disconnect');
             this.device.once('disconnect', () => {
-                this.log.warn(`[BLE] 연결 유실. 재시도를 준비합니다.`);
+                this.log.warn(`[BLE] 연결 유실 감지.`);
                 this.isConnected = false;
                 this.stopPingLoop();
-                this.device.disconnect().catch(() => {});
+                this.device = null;
             });
 
             await this.discoverCharacteristics();
         } catch (e) {
             this.log.error(`[BLE] 연결 실패: ${e.message}`);
             this.isConnected = false;
-            if (this.device) {
-                await this.device.disconnect().catch(() => {});
-            }
+            this.device = null;
         }
     }
 
@@ -172,26 +168,18 @@ class HeatingMatAccessory {
         }
     }
 
-    async setupDescriptor(characteristic) {
-        try {
-            // 표준 CCCD UUID는 00002902-0000-1000-8000-00805f9b34fb 입니다.
-            const descriptor = await characteristic.getDescriptor('00002902-0000-1000-8000-00805f9b34fb');
-            // '01 00'은 알림(Notification) 활성화를 의미합니다.
-            await descriptor.writeValue(Buffer.from([0x01, 0x00]));
-        } catch (e) {
-            this.log.warn(`[BLE] Descriptor 설정 건너뜀 (이미 활성화되었거나 미지원): ${e.message}`);
-        }
-    }
-
     startPingLoop() {
         this.stopPingLoop();
         this.pingInterval = setInterval(async () => {
-            if (!this.isConnected || !this.tempChar) return;
+            if (!this.isConnected || !this.tempChar) {
+                this.stopPingLoop();
+                return;
+            }
             try {
                 await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
                 this.log.debug(`[BLE] Ping (0x12) 발송`);
             } catch (e) {
-                this.log.warn(`[BLE] Ping 실패: ${e.message}`);
+                this.log.warn(`[BLE] Ping 전송 실패, 연결 확인 필요.`);
             }
         }, CONFIG.PING_INTERVAL);
     }
