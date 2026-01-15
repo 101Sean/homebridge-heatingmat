@@ -7,7 +7,7 @@ const CONFIG = {
     RETRY_COUNT: 3,
     RECONNECT_DELAY: 10000,
     CONNECT_TIMEOUT: 20000,
-    GATT_WAIT_MS: 500,
+    GATT_WAIT_MS: 2000,
     PING_INTERVAL: 20000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
@@ -143,16 +143,17 @@ class HeatingMatAccessory {
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
             this.timeChar = await service.getCharacteristic(this.charTimeUuid);
 
-            await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
             this.log.info(`[BLE] 1단계: 인증 패킷 전송`);
-            await sleep(200);
+            await this.writeRaw(this.setChar, Buffer.from(this.initPacketHex, 'hex'));
+            await sleep(500);
 
-            await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
             this.log.info(`[BLE] 2단계: 상태 요청(0x12) 전송`);
+            await this.writeRaw(this.tempChar, this.createControlPacket(0x12));
 
             await this.tempChar.startNotifications();
             this.tempChar.on('valuechanged', (data) => this.handleUpdate(data, 'temp'));
-            await sleep(200);
+
+            await sleep(500);
             await this.timeChar.startNotifications();
             this.timeChar.on('valuechanged', (data) => this.handleUpdate(data, 'timer'));
 
