@@ -8,7 +8,7 @@ const CONFIG = {
     RETRY_COUNT: 3,
     RECONNECT_DELAY: 10000,
     CONNECT_TIMEOUT: 20000,
-    GATT_WAIT_MS: 500,
+    GATT_WAIT_MS: 2000,
     PING_INTERVAL: 15000,
     TEMP_LEVEL_MAP: { 0: 0, 36: 1, 37: 2, 38: 3, 39: 4, 40: 5, 41: 6, 42: 7 },
     LEVEL_TEMP_MAP: { 0: 0, 1: 36, 2: 37, 3: 38, 4: 39, 5: 40, 6: 41, 7: 42 },
@@ -174,10 +174,10 @@ class HeatingMatAccessory {
 
     async discoverCharacteristics() {
         try {
-            const gatt = await this.withTimeout(this.device.gatt(), 5000, "GATT Server");
+            const gatt = await this.withTimeout(this.device.gatt(), 10000, "GATT Server");
             await sleep(CONFIG.GATT_WAIT_MS);
 
-            const service = await this.withTimeout(gatt.getPrimaryService(this.serviceUuid), 5000, "Primary Service");
+            const service = await this.withTimeout(gatt.getPrimaryService(this.serviceUuid), 10000, "Primary Service");
 
             this.setChar = await service.getCharacteristic(this.charSetUuid)
             this.tempChar = await service.getCharacteristic(this.charTempUuid);
